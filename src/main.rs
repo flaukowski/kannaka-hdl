@@ -2,7 +2,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 use kannaka_hdl::emit;
 use kannaka_hdl::grow::{fnv1a64, grow, UnresolvedMode};
 use kannaka_hdl::parser::parse;
-use kannaka_hdl::registry::{default_path, resolve_plan, unresolved_count, Registry};
+use kannaka_hdl::registry::{
+    default_path, evaluate_expectations, resolve_plan, unresolved_count, MemoryCliProvider,
+    Provider, Registry,
+};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -65,6 +68,14 @@ enum Command {
         /// execution, speculative approximates (ADR-0002 §10)
         #[arg(long, value_enum, default_value = "speculative")]
         unresolved: UnresolvedCli,
+        /// Resolve memory-domain queries against a live Kannaka Memory
+        /// via the kannaka CLI (optionally give the binary path)
+        #[arg(long, num_args = 0..=1, default_missing_value = "kannaka")]
+        memory_provider: Option<PathBuf>,
+        /// Publish the plan's capability discovery requests to the
+        /// swarm work queue via `kannaka swarm enqueue` (ADR-0002 §14)
+        #[arg(long, num_args = 0..=1, default_missing_value = "kannaka")]
+        publish_discovery: Option<PathBuf>,
         #[arg(long, value_enum, default_value = "json")]
         emit: EmitKind,
         /// Output file (default: stdout)
@@ -103,6 +114,8 @@ fn dispatch(command: Command) -> Result<(), String> {
             registry,
             no_resolve,
             unresolved,
+            memory_provider,
+            publish_discovery,
             emit,
             out,
         } => {
@@ -122,39 +135,99 @@ fn dispatch(command: Command) -> Result<(), String> {
                 }
             } else {
                 let path = registry.unwrap_or_else(default_path);
-                match Registry::load(&path) {
-                    Ok(reg) => {
-                        resolve_plan(&mut plan, &[&reg]);
-                        eprintln!(
-                            "resolved against {} ({} primitives), {} warning(s)",
-                            reg.source.display(),
-                            reg.len(),
-                            plan.warnings.len()
-                        );
-                        for w in &plan.warnings {
-                            eprintln!("  warning: {w}");
-                        }
-                        let missing = unresolved_count(&plan);
-                        if strict && missing > 0 {
-                            return Err(format!(
-                                "strict mode: {missing} component(s) unresolved — the swarm has not grown them yet (see warnings above)"
-                            ));
-                        }
-                    }
+                let memory = memory_provider.map(MemoryCliProvider::new);
+                let crystal = match Registry::load(&path) {
+                    Ok(reg) => Some(reg),
                     Err(e) if strict => {
                         return Err(format!("strict mode: registry unavailable: {e}"));
                     }
                     Err(e) => {
                         plan.warnings.push(format!("registry unavailable: {e}"));
-                        eprintln!("warning: {e} — emitting unresolved plan");
+                        eprintln!("warning: {e} — crystal queries stay unresolved");
+                        None
                     }
+                };
+
+                let mut providers: Vec<&dyn Provider> = Vec::new();
+                if let Some(reg) = &crystal {
+                    providers.push(reg);
                 }
+                if let Some(memory) = &memory {
+                    providers.push(memory);
+                }
+                resolve_plan(&mut plan, &providers);
+                eprintln!(
+                    "resolved against {}{}, {} warning(s)",
+                    crystal
+                        .as_ref()
+                        .map(|r| format!("{} ({} primitives)", r.source.display(), r.len()))
+                        .unwrap_or_else(|| "no crystal registry".into()),
+                    if memory.is_some() {
+                        " + live kannaka memory"
+                    } else {
+                        ""
+                    },
+                    plan.warnings.len()
+                );
+                for w in &plan.warnings {
+                    eprintln!("  warning: {w}");
+                }
+                let missing = unresolved_count(&plan);
+                if strict && missing > 0 {
+                    return Err(format!(
+                        "strict mode: {missing} component(s) unresolved — the swarm has not grown them yet (see warnings above)"
+                    ));
+                }
+            }
+
+            let expectation_failures = evaluate_expectations(&mut plan, &program.expects);
+            for e in &plan.expectations {
+                eprintln!(
+                    "expect {} {} {} — {}{}",
+                    e.metric,
+                    e.cmp,
+                    e.expected,
+                    e.status,
+                    e.observed
+                        .map(|o| format!(" (observed {o})"))
+                        .unwrap_or_default()
+                );
+            }
+            if expectation_failures > 0 {
+                return Err(format!(
+                    "{expectation_failures} expectation(s) failed — evidence requirements not met, nothing emitted"
+                ));
             }
 
             plan.seal(&source);
             if !plan.discovery_requests.is_empty() {
                 eprintln!(
                     "{} capability discovery request(s) in plan — publishable to the swarm (ADR-0002 §14)",
+                    plan.discovery_requests.len()
+                );
+            }
+            if let Some(bin) = publish_discovery {
+                let mut published = 0;
+                for request in &plan.discovery_requests {
+                    let payload = serde_json::to_string(request).map_err(|e| e.to_string())?;
+                    match std::process::Command::new(&bin)
+                        .args(["swarm", "enqueue", "capability_discovery", &payload])
+                        .output()
+                    {
+                        Ok(o) if o.status.success() => published += 1,
+                        Ok(o) => eprintln!(
+                            "warning: enqueue failed for \"{}\": {}",
+                            request.class,
+                            String::from_utf8_lossy(&o.stderr).trim()
+                        ),
+                        Err(e) => {
+                            eprintln!("warning: cannot run {}: {e}", bin.display());
+                            break;
+                        }
+                    }
+                }
+                eprintln!(
+                    "published {published}/{} discovery request(s) to the swarm work queue",
                     plan.discovery_requests.len()
                 );
             }

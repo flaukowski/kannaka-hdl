@@ -54,6 +54,18 @@ Unresolved components follow an explicit policy (`--unresolved`, ADR-0002 §10):
 kannaka-hdl grow examples/membank.khdl --unresolved strict --emit crystal -o bank.crystal
 ```
 
+Memory-domain queries (`base memory.glyph "…"`) resolve against a **live Kannaka Memory** with `--memory-provider` (bilateral resonance recall via the `kannaka` CLI; candidates must resonate at ≥ 0.5 similarity so resolution is never vacuous). Unsatisfied queries become `capability_discovery` requests in the plan (ADR-0002 §14) — `--publish-discovery` pushes them onto the swarm work queue via `kannaka swarm enqueue`.
+
+Programs can declare **evidence requirements** (ADR-0002 §16) that gate emission:
+
+```text
+expect unresolved_components == 0
+expect noise_tolerance >= 0.6      # worst case over resolved components
+expect capacity >= 8
+```
+
+Compiler-verifiable metrics evaluate immediately (`pass`/`fail` — a fail aborts with nonzero exit); runtime metrics like `recall_accuracy` report `unsupported` until backend runners exist, never a silent pass.
+
 ### Running grown architectures (isolated lab)
 
 Run `.crystal` output against a **snapshot copy** of the registry, not the live data dir — a running archivist saves every few seconds and last-writer-wins will eat your run's STABILIZE registrations (learned live; kannaka-crystal ADR-0002):

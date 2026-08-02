@@ -464,6 +464,208 @@ pub fn unresolved_count(plan: &Plan) -> usize {
         + plan.bridges.iter().filter(|b| b.resolved.is_none()).count()
 }
 
+/// The provider identifier the live Kannaka Memory CLI answers as.
+pub const PROVIDER_MEMORY_CLI: &str = "kannaka-memory-cli";
+
+/// Resonance recall always returns the nearest memories, so resolving
+/// a class against unrelated content would be vacuous. Without an
+/// explicit floor a candidate must resonate at least this strongly; a
+/// query's explicit `min_noise_tolerance` replaces the default in
+/// either direction — today's hash encoder rarely clears 0.5 even for
+/// related content (the known encoder floor), and an author declaring
+/// their own evidence threshold beats a conservative default.
+const MEMORY_MIN_SIMILARITY: f64 = 0.5;
+
+/// A live Kannaka Memory provider (ADR-0002 §2/§12) backed by the
+/// `kannaka` CLI's bilateral resonance recall
+/// (`kannaka recall <class> --top-k N --envelope`, envelope schema 1.0).
+///
+/// Contract mapping (`memory-recall-v1`): memory `strength` →
+/// `persistence`, recall `similarity` → `noise_tolerance`, material is
+/// always `"hrm"`. The mapping is an analogy, not an identity — see
+/// ADR-0002 §13 ("a transform is not assumed to preserve meaning
+/// merely because two systems use the word resonance").
+pub struct MemoryCliProvider {
+    pub binary: PathBuf,
+    pub top_k: usize,
+}
+
+impl MemoryCliProvider {
+    pub fn new(binary: PathBuf) -> Self {
+        MemoryCliProvider { binary, top_k: 8 }
+    }
+}
+
+/// Parse a `kannaka recall --envelope` stdout into candidates for a
+/// query — pure so it stays testable without the binary. Lines before
+/// the JSON envelope (backend banners) are skipped.
+fn parse_recall_envelope(stdout: &str, query: &Query) -> Vec<Resolved> {
+    let Some(envelope) = stdout
+        .lines()
+        .filter(|l| l.trim_start().starts_with('{'))
+        .find_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v.get("schema_version").is_some())
+    else {
+        return Vec::new();
+    };
+    let Some(data) = envelope.get("data").and_then(|d| d.as_array()) else {
+        return Vec::new();
+    };
+    let similarity_floor = if query.min_noise_tolerance > 0.0 {
+        query.min_noise_tolerance
+    } else {
+        MEMORY_MIN_SIMILARITY
+    };
+    data.iter()
+        .filter_map(|m| {
+            let similarity = m.get("similarity")?.as_f64()?;
+            let strength = m.get("strength")?.as_f64()?;
+            let id = m.get("id")?.as_str()?;
+            (similarity >= similarity_floor && strength >= query.min_persistence).then(|| {
+                Resolved {
+                    provider: PROVIDER_MEMORY_CLI,
+                    id: id.to_string(),
+                    class: query.class.clone(),
+                    persistence: strength,
+                    noise_tolerance: similarity,
+                    material: "hrm".into(),
+                }
+            })
+        })
+        .collect()
+}
+
+impl Provider for MemoryCliProvider {
+    fn id(&self) -> &'static str {
+        PROVIDER_MEMORY_CLI
+    }
+
+    fn domain(&self) -> &'static str {
+        crate::grow::DOMAIN_MEMORY
+    }
+
+    fn snapshot(&self) -> RegistrySnapshot {
+        RegistrySnapshot {
+            provider: PROVIDER_MEMORY_CLI,
+            domain: crate::grow::DOMAIN_MEMORY,
+            source: format!("{} recall --envelope", self.binary.display()),
+            primitives: 0,
+        }
+    }
+
+    fn supports_type(&self, component_type: &str) -> bool {
+        matches!(
+            component_type,
+            "glyph" | "memory" | "belief" | "context" | "dream"
+        )
+    }
+
+    fn candidates(&self, query: &Query) -> Vec<Resolved> {
+        // Material floors other than "hrm" can never match this medium.
+        if query.material.as_deref().is_some_and(|m| m != "hrm") {
+            return Vec::new();
+        }
+        let output = std::process::Command::new(&self.binary)
+            .args([
+                "recall",
+                &query.class,
+                "--top-k",
+                &self.top_k.to_string(),
+                "--envelope",
+            ])
+            .output();
+        match output {
+            Ok(out) => parse_recall_envelope(&String::from_utf8_lossy(&out.stdout), query),
+            Err(e) => {
+                eprintln!(
+                    "warning: memory provider unavailable ({}: {e}) — memory queries stay unresolved",
+                    self.binary.display()
+                );
+                Vec::new()
+            }
+        }
+    }
+}
+
+/// A declared expectation and its verdict (ADR-0002 §16).
+#[derive(Debug, Clone, Serialize)]
+pub struct Expectation {
+    pub metric: String,
+    pub cmp: String,
+    pub expected: f64,
+    pub observed: Option<f64>,
+    /// `pass` | `fail` | `unsupported` (needs a backend runner) |
+    /// `inconclusive` (nothing resolved to measure)
+    pub status: &'static str,
+}
+
+/// Evaluate a program's `expect` declarations against the resolved
+/// plan (ADR-0002 §16), recording verdicts in the plan and returning
+/// the failure count. Compiler-verifiable metrics:
+/// `unresolved_components`, `capacity` (leaf count), `couplings`
+/// (coupling count), and worst-case `persistence` / `noise_tolerance`
+/// over resolved components. Metrics that need a backend runner
+/// (e.g. `recall_accuracy`, `swarm_agents`) report `unsupported` —
+/// never a silent pass.
+pub fn evaluate_expectations(plan: &mut Plan, expects: &[crate::parser::Expect]) -> usize {
+    use crate::parser::Cmp;
+
+    let worst = |plan: &Plan, f: fn(&Resolved) -> f64| -> Option<f64> {
+        plan.leaves
+            .iter()
+            .filter_map(|l| l.resolved.as_ref())
+            .chain(plan.bridges.iter().filter_map(|b| b.resolved.as_ref()))
+            .map(f)
+            .min_by(f64::total_cmp)
+    };
+
+    let mut failures = 0;
+    for expect in expects {
+        let measured: Option<Option<f64>> = match expect.metric.as_str() {
+            "unresolved_components" => Some(Some(unresolved_count(plan) as f64)),
+            "capacity" => Some(Some(plan.leaves.len() as f64)),
+            "couplings" => Some(Some(plan.bridges.len() as f64)),
+            "persistence" => Some(worst(plan, |r| r.persistence)),
+            "noise_tolerance" => Some(worst(plan, |r| r.noise_tolerance)),
+            _ => None,
+        };
+        let (status, observed) = match measured {
+            None => ("unsupported", None),
+            Some(None) => ("inconclusive", None),
+            Some(Some(observed)) => {
+                let holds = match expect.cmp {
+                    Cmp::Lt => observed < expect.value,
+                    Cmp::Le => observed <= expect.value,
+                    Cmp::Gt => observed > expect.value,
+                    Cmp::Ge => observed >= expect.value,
+                    Cmp::Eq => observed == expect.value,
+                    Cmp::Ne => observed != expect.value,
+                };
+                (if holds { "pass" } else { "fail" }, Some(observed))
+            }
+        };
+        if status == "fail" {
+            failures += 1;
+        }
+        plan.expectations.push(Expectation {
+            metric: expect.metric.clone(),
+            cmp: match expect.cmp {
+                Cmp::Lt => "<",
+                Cmp::Le => "<=",
+                Cmp::Gt => ">",
+                Cmp::Ge => ">=",
+                Cmp::Eq => "==",
+                Cmp::Ne => "!=",
+            }
+            .into(),
+            expected: expect.value,
+            observed,
+            status,
+        });
+    }
+    failures
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -687,6 +889,104 @@ mod tests {
         let domains: Vec<_> = plan.leaves.iter().map(|l| l.domain.as_str()).collect();
         assert_eq!(domains, vec!["crystal", "memory"]);
         assert_eq!(plan.leaves[1].resolved.as_ref().unwrap().id, "GLYPH-000001");
+    }
+
+    #[test]
+    fn recall_envelope_parses_with_similarity_floor() {
+        // Modeled on a real `kannaka recall --envelope` capture:
+        // banner lines precede the schema-1.0 JSON envelope on one line.
+        let stdout = concat!(
+            "Using HRM backend (Holographic Resonance Medium)\n",
+            "[hrm] Using Holographic Resonance Medium - storage IS computation\n",
+            r#"{"command":"recall","data":[{"age_hours":1.0,"content":"a","id":"MEM-1","layer":0,"similarity":0.81,"strength":0.62},{"age_hours":2.0,"content":"b","id":"MEM-2","layer":0,"similarity":0.31,"strength":0.9}],"errors":[],"schema_version":"1.0"}"#,
+            "\n"
+        );
+
+        let q = query("Identity Glyph", 0.0);
+        let got = parse_recall_envelope(stdout, &q);
+        assert_eq!(got.len(), 1, "similarity 0.31 falls below the 0.5 floor");
+        assert_eq!(got[0].id, "MEM-1");
+        assert_eq!(got[0].provider, PROVIDER_MEMORY_CLI);
+        assert_eq!(got[0].class, "Identity Glyph");
+        assert!((got[0].persistence - 0.62).abs() < 1e-9);
+        assert!((got[0].noise_tolerance - 0.81).abs() < 1e-9);
+
+        // An explicit floor replaces the default in both directions:
+        // raised, it excludes everything; lowered, it admits weaker
+        // resonance (today's hash encoder rarely clears 0.5).
+        let mut strict_q = query("Identity Glyph", 0.0);
+        strict_q.min_noise_tolerance = 0.9;
+        assert!(parse_recall_envelope(stdout, &strict_q).is_empty());
+        let mut loose_q = query("Identity Glyph", 0.0);
+        loose_q.min_noise_tolerance = 0.3;
+        assert_eq!(parse_recall_envelope(stdout, &loose_q).len(), 2);
+
+        // Garbage in, empty out — never a panic.
+        assert!(parse_recall_envelope("no json here", &q).is_empty());
+    }
+
+    #[test]
+    fn expectations_evaluate_pass_fail_unsupported_inconclusive() {
+        use crate::parser::{Cmp, Expect};
+        let fixture = FixtureProvider::new(vec![seed("FIX-A", 0.7, 0.6)]);
+        let src = r#"
+            cell Bank(n) {
+                when n > 1  => split Bank(n / 2), Bank(n / 2)
+                when always => base "Memory Seed"
+            }
+            grow Bank(4)
+        "#;
+        let mut plan = grow(&parse(src).unwrap()).unwrap();
+        resolve_plan(&mut plan, &[&fixture]);
+
+        let expects = vec![
+            Expect {
+                metric: "unresolved_components".into(),
+                cmp: Cmp::Eq,
+                value: 0.0,
+                line: 1,
+            },
+            Expect {
+                metric: "capacity".into(),
+                cmp: Cmp::Ge,
+                value: 8.0,
+                line: 2,
+            },
+            Expect {
+                metric: "noise_tolerance".into(),
+                cmp: Cmp::Ge,
+                value: 0.5,
+                line: 3,
+            },
+            Expect {
+                metric: "recall_accuracy".into(),
+                cmp: Cmp::Ge,
+                value: 0.8,
+                line: 4,
+            },
+        ];
+        let failures = evaluate_expectations(&mut plan, &expects);
+        let statuses: Vec<&str> = plan.expectations.iter().map(|e| e.status).collect();
+        assert_eq!(statuses, vec!["pass", "fail", "pass", "unsupported"]);
+        assert_eq!(
+            failures, 1,
+            "capacity 4 < 8 fails; unsupported is not a failure"
+        );
+        assert_eq!(plan.expectations[1].observed, Some(4.0));
+
+        // Nothing resolved -> worst-case metrics are inconclusive.
+        let mut bare = grow(&parse(src).unwrap()).unwrap();
+        let failures = evaluate_expectations(
+            &mut bare,
+            &[Expect {
+                metric: "persistence".into(),
+                cmp: Cmp::Ge,
+                value: 0.1,
+                line: 1,
+            }],
+        );
+        assert_eq!(failures, 0);
+        assert_eq!(bare.expectations[0].status, "inconclusive");
     }
 
     #[test]

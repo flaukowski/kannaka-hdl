@@ -109,10 +109,23 @@ pub struct CellDef {
     pub rules: Vec<Rule>,
 }
 
+/// A declared evidence requirement (ADR-0002 §16):
+/// `expect <metric> <cmp> <number>`. The compiler evaluates what it
+/// can from the plan; metrics needing a backend runner report
+/// `unsupported` instead of silently passing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Expect {
+    pub metric: String,
+    pub cmp: Cmp,
+    pub value: f64,
+    pub line: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub cells: Vec<CellDef>,
     pub grows: Vec<Call>,
+    pub expects: Vec<Expect>,
 }
 
 /* ------------------------------- lexer ------------------------------- */
@@ -474,6 +487,7 @@ pub fn parse(source: &str) -> Result<Program, ParseError> {
     let mut p = Parser { toks, pos: 0 };
     let mut cells = Vec::new();
     let mut grows = Vec::new();
+    let mut expects = Vec::new();
 
     while let Some(tok) = p.peek().cloned() {
         match tok {
@@ -522,7 +536,32 @@ pub fn parse(source: &str) -> Result<Program, ParseError> {
                 p.pos += 1;
                 grows.push(p.parse_call()?);
             }
-            other => return Err(p.err(format!("expected `cell` or `grow`, got {other:?}"))),
+            Tok::Ident(kw) if kw == "expect" => {
+                let line = p.line();
+                p.pos += 1;
+                let metric = p.expect_ident()?;
+                let cmp = match p.next() {
+                    Some(Tok::Punct("<")) => Cmp::Lt,
+                    Some(Tok::Punct("<=")) => Cmp::Le,
+                    Some(Tok::Punct(">")) => Cmp::Gt,
+                    Some(Tok::Punct(">=")) => Cmp::Ge,
+                    Some(Tok::Punct("==")) => Cmp::Eq,
+                    Some(Tok::Punct("!=")) => Cmp::Ne,
+                    other => return Err(p.err(format!("expected comparison, got {other:?}"))),
+                };
+                let value = p.expect_number()?;
+                expects.push(Expect {
+                    metric,
+                    cmp,
+                    value,
+                    line,
+                });
+            }
+            other => {
+                return Err(p.err(format!(
+                    "expected `cell`, `grow`, or `expect`, got {other:?}"
+                )))
+            }
         }
     }
     if grows.is_empty() {
@@ -531,7 +570,11 @@ pub fn parse(source: &str) -> Result<Program, ParseError> {
             message: "no `grow` statement".into(),
         });
     }
-    Ok(Program { cells, grows })
+    Ok(Program {
+        cells,
+        grows,
+        expects,
+    })
 }
 
 #[cfg(test)]
@@ -620,10 +663,31 @@ mod tests {
         assert_eq!(err.line, 2);
 
         let err = parse("frobnicate").unwrap_err();
-        assert!(err.message.contains("expected `cell` or `grow`"));
+        assert!(err.message.contains("expected `cell`, `grow`, or `expect`"));
 
         let err = parse("cell X() { when always => base \"Y\" }").unwrap_err();
         assert!(err.message.contains("no `grow`"));
+    }
+
+    #[test]
+    fn expect_statements_parse() {
+        let src = r#"
+            cell X() { when always => base "Seed" }
+            grow X()
+            expect unresolved_components == 0
+            expect noise_tolerance >= 0.6
+        "#;
+        let prog = parse(src).unwrap();
+        assert_eq!(prog.expects.len(), 2);
+        assert_eq!(prog.expects[0].metric, "unresolved_components");
+        assert_eq!(prog.expects[0].cmp, Cmp::Eq);
+        assert_eq!(prog.expects[0].value, 0.0);
+        assert_eq!(prog.expects[1].metric, "noise_tolerance");
+        assert_eq!(prog.expects[1].cmp, Cmp::Ge);
+        assert!((prog.expects[1].value - 0.6).abs() < 1e-9);
+
+        let err = parse("expect foo bar\ngrow X()").unwrap_err();
+        assert!(err.message.contains("expected comparison"));
     }
 
     #[test]

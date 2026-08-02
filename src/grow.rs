@@ -112,6 +112,8 @@ pub struct Plan {
     /// Structured research requests for capabilities the swarm has not
     /// grown yet (ADR-0002 §14) — one per distinct unsatisfied query.
     pub discovery_requests: Vec<crate::registry::DiscoveryRequest>,
+    /// Declared evidence requirements and their verdicts (ADR-0002 §16).
+    pub expectations: Vec<crate::registry::Expectation>,
     pub warnings: Vec<String>,
 }
 
@@ -339,6 +341,7 @@ pub fn grow(program: &Program) -> Result<Plan, GrowError> {
         registry_snapshots: Vec::new(),
         resolution_report: None,
         discovery_requests: Vec::new(),
+        expectations: Vec::new(),
         warnings: Vec::new(),
     })
 }

@@ -2,6 +2,34 @@
 
 All notable changes to kannaka-hdl are documented here.
 
+## v0.6.0 — 2026-08-02
+
+ADR-0002 Phases 6 (publish) and 7 (assertions) first slices, plus a
+live Kannaka Memory provider.
+
+### Added
+- **Live Memory provider** (`--memory-provider [BINARY]`): resolves
+  memory-domain queries against a running Kannaka Memory through the
+  `kannaka` CLI's bilateral resonance recall (`recall --envelope`,
+  envelope schema 1.0). Contract mapping `memory-recall-v1`: memory
+  `strength` → `persistence`, recall `similarity` → `noise_tolerance`,
+  material `"hrm"`. Resonance recall always returns nearest memories,
+  so candidates must resonate at ≥ 0.5 similarity (raised by the
+  query's `min_noise_tolerance`) — resolution is never vacuous.
+- **`expect` assertions** (ADR-0002 §16, acceptance #12):
+  `expect <metric> <cmp> <number>` at top level. Compiler-verifiable
+  now: `unresolved_components`, `capacity`, `couplings`, and
+  worst-case `persistence` / `noise_tolerance` over resolved
+  components. Runtime metrics (e.g. `recall_accuracy`,
+  `swarm_agents`) report `unsupported` — never a silent pass; nothing
+  resolved reports `inconclusive`. Verdicts land in the plan; any
+  `fail` aborts emission with a nonzero exit.
+- **`--publish-discovery [BINARY]`** (ADR-0002 §14): pushes the plan's
+  `capability_discovery` requests onto the swarm work queue via
+  `kannaka swarm enqueue capability_discovery <json>`, reporting the
+  published count. Swarm workers can pick them up; re-resolving plans
+  on capability announcements remains future §14 work.
+
 ## v0.5.0 — 2026-08-02
 
 ADR-0002 §14, first slice of the swarm feedback loop (acceptance #10).
