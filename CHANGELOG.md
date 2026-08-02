@@ -4,12 +4,19 @@ All notable changes to kannaka-hdl are documented here.
 
 ## v0.2.0 — 2026-08-02
 
-ADR-0002 Phase 1: HDL now officially stands for **Holographic
-Development Language**, and the plan becomes the versioned Abstract
+ADR-0002 Phases 1–2: HDL now officially stands for **Holographic
+Development Language**, the plan becomes the versioned Abstract
 Holographic Plan — the domain-neutral intermediate representation the
-rest of the ADR builds on.
+rest of the ADR builds on — and resolution goes through a generic
+provider interface.
 
 ### Added
+- **Provider abstraction** (ADR-0002 §2): resolution runs against the
+  `Provider` trait (id + domain + snapshot + query). The Crystal
+  registry is the first implementation; `FixtureProvider` offers
+  static in-memory components for tests and offline development with
+  identical query semantics. Memory (HRM) and NATS swarm providers
+  implement the same contract once typed queries land (Phase 3).
 - **Plan identity**: `schema_version` ("1"), `compiler_version`, and
   deterministic `program_hash` / `plan_hash` (FNV-1a 64, stable across
   platforms; the plan hash covers resolution results, so the same

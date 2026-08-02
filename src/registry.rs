@@ -7,6 +7,7 @@
 //! `~/.kannaka-crystal/registry.json`).
 
 use crate::grow::Plan;
+use crate::parser::Query;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -26,10 +27,31 @@ struct RawRegistry {
     primitives: Vec<RawPrimitive>,
 }
 
-/// The provider identifier this resolver answers as (ADR-0002 §2).
-/// Phase 2 will put this behind a generic provider interface; for now
-/// the Crystal registry is the only provider and says so explicitly.
+/// The provider identifier the Crystal registry answers as (ADR-0002 §2).
 pub const PROVIDER_CRYSTAL: &str = "crystal-registry";
+
+/// A component provider (ADR-0002 §2): something that answers component
+/// queries for one domain. The Crystal registry is the first
+/// implementation; Memory (HRM) and NATS swarm providers take the same
+/// contract when their domains arrive with typed queries (Phase 3) —
+/// a Memory provider resolves glyph/memory/belief/context/dream
+/// components against a Kannaka Memory instance, a Swarm provider
+/// resolves agent roles and NATS subjects against live or declared
+/// swarm capabilities. Providers may be backed by local files,
+/// registries, services, NATS requests, or static fixtures.
+pub trait Provider {
+    /// Stable identifier recorded on every component this provider
+    /// resolves (e.g. `crystal-registry`, `fixture`).
+    fn id(&self) -> &'static str;
+    /// The component domain this provider answers for.
+    fn domain(&self) -> &'static str;
+    /// A snapshot of this provider's current evidence source, recorded
+    /// in the plan so resolution is reproducible.
+    fn snapshot(&self) -> RegistrySnapshot;
+    /// Answer a query; `None` means this provider has no component
+    /// satisfying it (which is a research TODO, not an error).
+    fn resolve_query(&self, query: &Query) -> Option<Resolved>;
+}
 
 /// What a resolved query carries into the plan.
 #[derive(Debug, Clone, Serialize)]
@@ -129,16 +151,92 @@ impl Registry {
     }
 }
 
-/// Resolve every leaf and bridge in a plan; unresolvable queries become
-/// warnings, not errors — an architecture can name structure the swarm
-/// has not discovered yet (that is a research TODO, not a crash).
-pub fn resolve_plan(plan: &mut Plan, registry: &Registry) {
+impl Provider for Registry {
+    fn id(&self) -> &'static str {
+        PROVIDER_CRYSTAL
+    }
+
+    fn domain(&self) -> &'static str {
+        crate::grow::DOMAIN_CRYSTAL
+    }
+
+    fn snapshot(&self) -> RegistrySnapshot {
+        RegistrySnapshot {
+            provider: PROVIDER_CRYSTAL,
+            domain: crate::grow::DOMAIN_CRYSTAL,
+            source: self.source.display().to_string(),
+            primitives: self.len(),
+        }
+    }
+
+    fn resolve_query(&self, query: &Query) -> Option<Resolved> {
+        self.resolve(
+            &query.class,
+            query.min_persistence,
+            query.material.as_deref(),
+        )
+    }
+}
+
+/// A static, in-memory provider for tests and offline development
+/// (ADR-0002 Phase 2) — no registry file, no sibling repo required.
+/// Resolution semantics match the Crystal registry: tolerant class
+/// normalization, persistence floor, optional material, best
+/// persistence wins.
+pub struct FixtureProvider {
+    pub components: Vec<Resolved>,
+}
+
+/// The provider identifier fixtures answer as.
+pub const PROVIDER_FIXTURE: &str = "fixture";
+
+impl FixtureProvider {
+    pub fn new(components: Vec<Resolved>) -> Self {
+        FixtureProvider { components }
+    }
+}
+
+impl Provider for FixtureProvider {
+    fn id(&self) -> &'static str {
+        PROVIDER_FIXTURE
+    }
+
+    fn domain(&self) -> &'static str {
+        crate::grow::DOMAIN_CRYSTAL
+    }
+
+    fn snapshot(&self) -> RegistrySnapshot {
+        RegistrySnapshot {
+            provider: PROVIDER_FIXTURE,
+            domain: self.domain(),
+            source: "(static fixture)".into(),
+            primitives: self.components.len(),
+        }
+    }
+
+    fn resolve_query(&self, query: &Query) -> Option<Resolved> {
+        let want = normalize(&query.class);
+        self.components
+            .iter()
+            .filter(|c| normalize(&c.class) == want)
+            .filter(|c| c.persistence >= query.min_persistence)
+            .filter(|c| query.material.as_deref().is_none_or(|m| c.material == m))
+            .max_by(|a, b| a.persistence.total_cmp(&b.persistence))
+            .map(|c| Resolved {
+                provider: PROVIDER_FIXTURE,
+                ..c.clone()
+            })
+    }
+}
+
+/// Resolve every leaf and bridge in a plan against a provider;
+/// unresolvable queries become warnings, not errors — an architecture
+/// can name structure the swarm has not discovered yet (that is a
+/// research TODO, not a crash). Strict mode turns those warnings into
+/// failure at the CLI layer.
+pub fn resolve_plan(plan: &mut Plan, provider: &dyn Provider) {
     for leaf in &mut plan.leaves {
-        leaf.resolved = registry.resolve(
-            &leaf.query.class,
-            leaf.query.min_persistence,
-            leaf.query.material.as_deref(),
-        );
+        leaf.resolved = provider.resolve_query(&leaf.query);
         if leaf.resolved.is_none() {
             plan.warnings.push(format!(
                 "no primitive for {} (class \"{}\", min_persistence {}{}) — swarm has not grown one yet",
@@ -154,16 +252,15 @@ pub fn resolve_plan(plan: &mut Plan, registry: &Registry) {
         }
     }
     for bridge in &mut plan.bridges {
-        bridge.resolved = registry.resolve(&bridge.class, 0.0, None);
+        bridge.resolved = provider.resolve_query(&Query {
+            class: bridge.class.clone(),
+            min_persistence: 0.0,
+            material: None,
+        });
     }
     plan.warnings.dedup();
 
-    plan.registry_snapshots.push(RegistrySnapshot {
-        provider: PROVIDER_CRYSTAL,
-        domain: crate::grow::DOMAIN_CRYSTAL,
-        source: registry.source.display().to_string(),
-        primitives: registry.len(),
-    });
+    plan.registry_snapshots.push(provider.snapshot());
     plan.resolution_report = Some(ResolutionReport {
         leaves_total: plan.leaves.len(),
         leaves_resolved: plan.leaves.iter().filter(|l| l.resolved.is_some()).count(),
@@ -196,6 +293,54 @@ mod tests {
         )
         .unwrap();
         path
+    }
+
+    #[test]
+    fn fixture_provider_resolves_without_any_registry_file() {
+        let fixture = FixtureProvider::new(vec![
+            Resolved {
+                provider: PROVIDER_FIXTURE,
+                id: "FIX-000001".into(),
+                class: "MemorySeed".into(),
+                persistence: 0.9,
+                noise_tolerance: 0.9,
+                material: "ideal_resonator".into(),
+            },
+            Resolved {
+                provider: PROVIDER_FIXTURE,
+                id: "FIX-000002".into(),
+                class: "HarmonicBridge".into(),
+                persistence: 0.5,
+                noise_tolerance: 0.5,
+                material: "ideal_resonator".into(),
+            },
+        ]);
+
+        let src = r#"
+            cell Bank(n) {
+                when n > 1  => split Bank(n / 2), Bank(n / 2) bridge "Harmonic Bridge"
+                when always => base "Memory Seed" min_persistence 0.4
+            }
+            grow Bank(4)
+        "#;
+        let mut plan = grow(&parse(src).unwrap()).unwrap();
+        resolve_plan(&mut plan, &fixture);
+
+        assert_eq!(unresolved_count(&plan), 0);
+        assert!(plan
+            .leaves
+            .iter()
+            .all(|l| l.resolved.as_ref().unwrap().provider == PROVIDER_FIXTURE));
+        assert!(plan.bridges.iter().all(|b| b.resolved.is_some()));
+        assert_eq!(plan.registry_snapshots[0].provider, PROVIDER_FIXTURE);
+        assert_eq!(plan.registry_snapshots[0].source, "(static fixture)");
+        // Same query semantics as the Crystal registry: floor excludes.
+        let q = crate::parser::Query {
+            class: "Memory Seed".into(),
+            min_persistence: 0.95,
+            material: None,
+        };
+        assert!(fixture.resolve_query(&q).is_none());
     }
 
     #[test]
