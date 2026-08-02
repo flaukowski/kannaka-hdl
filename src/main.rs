@@ -21,6 +21,8 @@ enum EmitKind {
     Json,
     Crystal,
     Html,
+    /// Kannaka Memory architecture plan (ADR-0002 §12, memory-plan-v1)
+    Memory,
 }
 
 /// Unresolved-component policy (ADR-0002 §10). `speculative` matches the
@@ -122,7 +124,7 @@ fn dispatch(command: Command) -> Result<(), String> {
                 let path = registry.unwrap_or_else(default_path);
                 match Registry::load(&path) {
                     Ok(reg) => {
-                        resolve_plan(&mut plan, &reg);
+                        resolve_plan(&mut plan, &[&reg]);
                         eprintln!(
                             "resolved against {} ({} primitives), {} warning(s)",
                             reg.source.display(),
@@ -154,6 +156,7 @@ fn dispatch(command: Command) -> Result<(), String> {
                 EmitKind::Json => emit::emit_json(&plan),
                 EmitKind::Crystal => emit::emit_crystal(&plan),
                 EmitKind::Html => emit::emit_html(&plan),
+                EmitKind::Memory => emit::emit_memory(&plan),
             };
             match out {
                 Some(path) => {

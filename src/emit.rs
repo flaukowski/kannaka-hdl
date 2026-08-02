@@ -9,12 +9,13 @@
 //! Every emitter declares its lowering model (ADR-0002 §11) so a
 //! consumer can tell a faithful serialization from an approximation.
 
-use crate::grow::{Plan, UnresolvedMode};
+use crate::grow::{Plan, UnresolvedMode, DOMAIN_MEMORY};
 use std::collections::HashMap;
 
 pub const LOWERING_JSON: &str = "plan-json-v1";
 pub const LOWERING_CRYSTAL: &str = "crystal-pulse-placement-v1";
 pub const LOWERING_HTML: &str = "html-growth-viz-v1";
+pub const LOWERING_MEMORY: &str = "memory-plan-v1";
 
 pub fn emit_json(plan: &Plan) -> String {
     let mut v = serde_json::to_value(plan).expect("plan serializes");
@@ -105,6 +106,116 @@ pub fn emit_crystal(plan: &Plan) -> String {
     }
     out.push_str("RESONATE 400\nDREAM deep\nSTABILIZE\n");
     out
+}
+
+/// Lower the plan's memory-domain components into a Kannaka Memory
+/// architecture plan (ADR-0002 §12): nodes, HRM-oriented relationships
+/// derived from typed couplings, and an executable `kannaka` CLI
+/// command list — the first executable Memory lowering path. Components
+/// from other domains are recorded under `skipped`, never silently
+/// dropped; unresolved nodes only lower to commands in speculative
+/// mode (stub mode declares them and counts them under
+/// `stubbed_nodes`).
+pub fn emit_memory(plan: &Plan) -> String {
+    use serde_json::{json, Value};
+
+    let speculate = plan.unresolved_mode == UnresolvedMode::Speculative;
+    let memory_leaves: Vec<&crate::grow::Leaf> = plan
+        .leaves
+        .iter()
+        .filter(|l| l.domain == DOMAIN_MEMORY)
+        .collect();
+    let node_id = |ordinal: usize| format!("m{ordinal}");
+
+    let nodes: Vec<Value> = memory_leaves
+        .iter()
+        .enumerate()
+        .map(|(ordinal, leaf)| {
+            json!({
+                "id": node_id(ordinal),
+                "cell": leaf.cell,
+                "component_type": leaf.query.component_type.as_deref().unwrap_or("memory"),
+                "class": leaf.query.class,
+                "resolved": leaf.resolved,
+                "region": { "x": leaf.x, "y": leaf.y, "w": leaf.w, "h": leaf.h },
+            })
+        })
+        .collect();
+
+    // A coupling endpoint belongs to the memory node whose region
+    // contains it; couplings touching non-memory regions don't lower.
+    let locate = |px: f64, py: f64| -> Option<usize> {
+        memory_leaves
+            .iter()
+            .position(|l| px >= l.x && px <= l.x + l.w && py >= l.y && py <= l.y + l.h)
+    };
+    let relationships: Vec<Value> = plan
+        .bridges
+        .iter()
+        .filter_map(|bridge| {
+            let from = locate(bridge.x1, bridge.y1)?;
+            let to = locate(bridge.x2, bridge.y2)?;
+            Some(json!({
+                "coupling_type": bridge.coupling_type,
+                "relation": bridge.query.class,
+                "domain": bridge.domain,
+                "from": node_id(from),
+                "to": node_id(to),
+                "resolved": bridge.resolved,
+            }))
+        })
+        .collect();
+
+    // Executable lowering: one kannaka CLI command per lowerable node.
+    let mut commands = Vec::new();
+    let mut stubbed = 0usize;
+    for (ordinal, leaf) in memory_leaves.iter().enumerate() {
+        if leaf.resolved.is_none() && !speculate {
+            stubbed += 1;
+            continue;
+        }
+        let importance = leaf
+            .resolved
+            .as_ref()
+            .map(|r| r.persistence)
+            .unwrap_or_else(|| leaf.query.min_persistence.max(0.5));
+        match leaf.query.component_type.as_deref().unwrap_or("memory") {
+            "dream" => commands.push(format!(
+                "kannaka dream --mode deep   # node {}",
+                node_id(ordinal)
+            )),
+            ty => commands.push(format!(
+                "kannaka remember \"{} {} (node {}, plan {})\" --importance {:.2}",
+                leaf.query.class,
+                ty,
+                node_id(ordinal),
+                plan.plan_hash,
+                importance
+            )),
+        }
+    }
+
+    let skipped: Vec<Value> = plan
+        .leaves
+        .iter()
+        .filter(|l| l.domain != DOMAIN_MEMORY)
+        .map(|l| json!({ "cell": l.cell, "domain": l.domain, "class": l.query.class }))
+        .collect();
+
+    let doc = json!({
+        "lowering_model": LOWERING_MEMORY,
+        "schema_version": plan.schema_version,
+        "compiler_version": plan.compiler_version,
+        "program_hash": plan.program_hash,
+        "plan_hash": plan.plan_hash,
+        "unresolved_mode": plan.unresolved_mode,
+        "nodes": nodes,
+        "relationships": relationships,
+        "commands": commands,
+        "stubbed_nodes": stubbed,
+        "skipped": skipped,
+    });
+    serde_json::to_string_pretty(&doc).expect("memory plan serializes")
 }
 
 pub fn emit_html(plan: &Plan) -> String {
@@ -242,6 +353,51 @@ mod tests {
             text.contains("# WARNING: 2 materials"),
             "flattening must be declared"
         );
+    }
+
+    #[test]
+    fn memory_backend_lowers_memory_domain_and_skips_crystal() {
+        let src = r#"
+            cell Glyphs(n) {
+                when n > 1  => split Glyphs(n / 2), Glyphs(n / 2) bridge memory.association "Mirror Link"
+                when always => base memory.glyph "Identity Glyph"
+            }
+            cell Seed() { when always => base "Memory Seed" }
+            grow Glyphs(2)
+            grow Seed()
+        "#;
+        let mut p = grow(&parse(src).unwrap()).unwrap();
+        p.seal(src);
+        let v: serde_json::Value = serde_json::from_str(&emit_memory(&p)).unwrap();
+        assert_eq!(v["lowering_model"], LOWERING_MEMORY);
+        assert_eq!(v["nodes"].as_array().unwrap().len(), 2);
+        assert_eq!(v["nodes"][0]["component_type"], "glyph");
+        assert_eq!(v["relationships"].as_array().unwrap().len(), 1);
+        assert_eq!(v["relationships"][0]["from"], "m0");
+        assert_eq!(v["relationships"][0]["to"], "m1");
+        assert_eq!(
+            v["skipped"].as_array().unwrap().len(),
+            1,
+            "crystal leaf skipped, not dropped"
+        );
+        let commands = v["commands"].as_array().unwrap();
+        assert_eq!(
+            commands.len(),
+            2,
+            "speculative default lowers unresolved nodes"
+        );
+        assert!(commands[0]
+            .as_str()
+            .unwrap()
+            .starts_with("kannaka remember"));
+
+        // Stub mode declares the nodes but withholds executable commands.
+        let mut stub = grow(&parse(src).unwrap()).unwrap();
+        stub.unresolved_mode = UnresolvedMode::Stub;
+        let v: serde_json::Value = serde_json::from_str(&emit_memory(&stub)).unwrap();
+        assert_eq!(v["nodes"].as_array().unwrap().len(), 2);
+        assert_eq!(v["commands"].as_array().unwrap().len(), 0);
+        assert_eq!(v["stubbed_nodes"], 2);
     }
 
     #[test]

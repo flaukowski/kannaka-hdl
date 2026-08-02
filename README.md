@@ -69,11 +69,12 @@ First lab result worth knowing: **resolution also chooses the field material** (
 
 ## Emitters
 
-| target | what you get |
-|---|---|
-| `json` | the plan: leaves (region, query, resolved primitive), bridges, warnings |
-| `crystal` | a runnable `.crystal` program — pulse-placement **approximation** of the architecture (honest caveat: real coupling ports are open research, see ADR-0001) |
-| `html` | standalone growth animation, zero dependencies |
+| target | lowering model | what you get |
+|---|---|---|
+| `json` | `plan-json-v1` | the Abstract Holographic Plan: leaves (region, query, resolved component), typed couplings, snapshots, hashes, warnings |
+| `crystal` | `crystal-pulse-placement-v1` | a runnable `.crystal` program — pulse-placement **approximation** of the architecture (honest caveat: real coupling ports are open research, see ADR-0001) |
+| `memory` | `memory-plan-v1` | a Kannaka Memory architecture plan (ADR-0002 §12): nodes, HRM relationships from typed couplings, and an executable `kannaka` CLI command list |
+| `html` | `html-growth-viz-v1` | standalone growth animation, zero dependencies |
 
 ## Status
 

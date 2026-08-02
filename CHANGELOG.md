@@ -2,6 +2,30 @@
 
 All notable changes to kannaka-hdl are documented here.
 
+## v0.4.0 — 2026-08-02
+
+ADR-0002 Phase 4: Kannaka Memory becomes a target.
+
+### Added
+- **`--emit memory`** (`memory-plan-v1`, ADR-0002 §12): lowers the
+  plan's memory-domain components into a Kannaka Memory architecture
+  plan — `nodes` (glyph/memory/belief/context/dream component types),
+  `relationships` derived from typed couplings whose endpoints land in
+  memory nodes, and an executable `commands` list for the `kannaka`
+  CLI (`kannaka remember` / `kannaka dream`) — the first executable
+  Memory lowering path. Components from other domains are recorded
+  under `skipped`, never silently dropped; unresolved nodes lower to
+  commands only in speculative mode (stub mode counts them under
+  `stubbed_nodes`).
+- **Multi-provider resolution**: `resolve_plan` takes a provider set
+  and routes each query to the provider answering its domain, so one
+  plan can span Crystal and Memory components (ADR-0002 acceptance #8).
+  All consulted providers land in `registry_snapshots`.
+- `FixtureProvider::with_domain` — stand in for domains whose live
+  providers haven't arrived (used to resolve `memory.glyph` today).
+  A live Memory provider backed by a running Kannaka instance is the
+  natural next step once the kannaka-memory query contract is settled.
+
 ## v0.3.0 — 2026-08-02
 
 ADR-0002 Phase 3: typed component queries and resolution strategies.

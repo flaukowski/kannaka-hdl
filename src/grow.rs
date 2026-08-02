@@ -31,10 +31,14 @@ pub enum GrowError {
     Runaway,
 }
 
-/// The component domain the compiler can resolve today. Queries may
-/// name other domains (`memory.glyph`, `swarm.agent`); until their
-/// providers arrive they resolve to an honest warning.
+/// The component domain the Crystal registry resolves. Queries may
+/// name other domains (`memory.glyph`, `swarm.agent`); domains with no
+/// provider resolve to an honest warning.
 pub const DOMAIN_CRYSTAL: &str = "crystal";
+
+/// The Kannaka Memory (HRM) domain (ADR-0002 §12) — lowered by the
+/// `memory` backend; resolvable through any provider answering for it.
+pub const DOMAIN_MEMORY: &str = "memory";
 
 /// Version of the Abstract Holographic Plan schema (ADR-0002 §7).
 /// "2": queries are typed (domain/type/floors/strategy) and bridges are

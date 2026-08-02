@@ -209,8 +209,10 @@ impl Provider for Registry {
 /// (ADR-0002 Phase 2) — no registry file, no sibling repo required.
 /// Resolution semantics match the Crystal registry: tolerant class
 /// normalization, persistence floor, optional material, best
-/// persistence wins.
+/// persistence wins. `with_domain` makes it stand in for domains whose
+/// live providers haven't arrived yet (e.g. `memory`).
 pub struct FixtureProvider {
+    pub domain: &'static str,
     pub components: Vec<Resolved>,
 }
 
@@ -219,7 +221,11 @@ pub const PROVIDER_FIXTURE: &str = "fixture";
 
 impl FixtureProvider {
     pub fn new(components: Vec<Resolved>) -> Self {
-        FixtureProvider { components }
+        Self::with_domain(crate::grow::DOMAIN_CRYSTAL, components)
+    }
+
+    pub fn with_domain(domain: &'static str, components: Vec<Resolved>) -> Self {
+        FixtureProvider { domain, components }
     }
 }
 
@@ -229,7 +235,7 @@ impl Provider for FixtureProvider {
     }
 
     fn domain(&self) -> &'static str {
-        crate::grow::DOMAIN_CRYSTAL
+        self.domain
     }
 
     fn snapshot(&self) -> RegistrySnapshot {
@@ -270,16 +276,17 @@ struct StrategyState {
     cursors: std::collections::HashMap<String, usize>,
 }
 
-/// Resolve one query. Returns the pick, or `None` plus the reason it
-/// could not be satisfied.
+/// Resolve one query against the provider answering its domain.
+/// Returns the pick, or `None` plus the reason it could not be
+/// satisfied.
 fn resolve_component(
-    provider: &dyn Provider,
+    providers: &[&dyn Provider],
     query: &Query,
     state: &mut StrategyState,
 ) -> (Option<Resolved>, Option<String>) {
     use crate::parser::Strategy;
 
-    if query.domain != provider.domain() {
+    let Some(provider) = providers.iter().find(|p| p.domain() == query.domain) else {
         return (
             None,
             Some(format!(
@@ -287,7 +294,7 @@ fn resolve_component(
                 query.domain
             )),
         );
-    }
+    };
     if let Some(t) = &query.component_type {
         if !provider.supports_type(t) {
             return (
@@ -355,23 +362,24 @@ fn resolve_component(
     }
 }
 
-/// Resolve every leaf and bridge in a plan against a provider;
-/// unresolvable queries become warnings, not errors — an architecture
-/// can name structure the swarm has not discovered yet (that is a
-/// research TODO, not a crash). Strict mode turns those warnings into
-/// failure at the CLI layer.
-pub fn resolve_plan(plan: &mut Plan, provider: &dyn Provider) {
+/// Resolve every leaf and bridge in a plan; each query goes to the
+/// provider answering its domain (a plan may span Crystal and Memory
+/// components — ADR-0002 §12). Unresolvable queries become warnings,
+/// not errors — an architecture can name structure the swarm has not
+/// discovered yet (that is a research TODO, not a crash). Strict mode
+/// turns those warnings into failure at the CLI layer.
+pub fn resolve_plan(plan: &mut Plan, providers: &[&dyn Provider]) {
     let mut state = StrategyState::default();
 
     for leaf in &mut plan.leaves {
-        let (resolved, reason) = resolve_component(provider, &leaf.query, &mut state);
+        let (resolved, reason) = resolve_component(providers, &leaf.query, &mut state);
         leaf.resolved = resolved;
         if let Some(reason) = reason {
             plan.warnings.push(format!("{}: {reason}", leaf.cell));
         }
     }
     for bridge in &mut plan.bridges {
-        let (resolved, reason) = resolve_component(provider, &bridge.query, &mut state);
+        let (resolved, reason) = resolve_component(providers, &bridge.query, &mut state);
         bridge.resolved = resolved;
         if let Some(reason) = reason {
             plan.warnings
@@ -380,7 +388,9 @@ pub fn resolve_plan(plan: &mut Plan, provider: &dyn Provider) {
     }
     plan.warnings.dedup();
 
-    plan.registry_snapshots.push(provider.snapshot());
+    for provider in providers {
+        plan.registry_snapshots.push(provider.snapshot());
+    }
     plan.resolution_report = Some(ResolutionReport {
         leaves_total: plan.leaves.len(),
         leaves_resolved: plan.leaves.iter().filter(|l| l.resolved.is_some()).count(),
@@ -444,7 +454,7 @@ mod tests {
             grow Bank(4)
         "#;
         let mut plan = grow(&parse(src).unwrap()).unwrap();
-        resolve_plan(&mut plan, &fixture);
+        resolve_plan(&mut plan, &[&fixture]);
 
         assert_eq!(unresolved_count(&plan), 0);
         assert!(plan
@@ -496,7 +506,7 @@ mod tests {
         let mut q = query("Memory Seed", 0.0);
         q.strategy = crate::parser::Strategy::Robust;
         let mut state = StrategyState::default();
-        let (picked, _) = resolve_component(&fixture, &q, &mut state);
+        let (picked, _) = resolve_component(&[&fixture], &q, &mut state);
         assert_eq!(picked.unwrap().id, "FIX-B");
     }
 
@@ -509,7 +519,7 @@ mod tests {
         ]);
         let src = UNBRIDGED_BANK.replace("STRAT", "unique");
         let mut plan = grow(&parse(&src).unwrap()).unwrap();
-        resolve_plan(&mut plan, &fixture);
+        resolve_plan(&mut plan, &[&fixture]);
 
         let ids: std::collections::HashSet<_> = plan
             .leaves
@@ -530,7 +540,7 @@ mod tests {
         let fixture = FixtureProvider::new(vec![seed("FIX-A", 0.9, 0.5), seed("FIX-B", 0.8, 0.5)]);
         let src = UNBRIDGED_BANK.replace("STRAT", "diverse");
         let mut plan = grow(&parse(&src).unwrap()).unwrap();
-        resolve_plan(&mut plan, &fixture);
+        resolve_plan(&mut plan, &[&fixture]);
 
         assert_eq!(unresolved_count(&plan), 0);
         let ids: Vec<_> = plan
@@ -549,13 +559,43 @@ mod tests {
             grow M()
         "#;
         let mut plan = grow(&parse(src).unwrap()).unwrap();
-        resolve_plan(&mut plan, &fixture);
+        resolve_plan(&mut plan, &[&fixture]);
         assert_eq!(unresolved_count(&plan), 1);
         assert!(plan
             .warnings
             .iter()
             .any(|w| w.contains("no provider for domain \"memory\"")));
         assert_eq!(plan.leaves[0].domain, "memory");
+    }
+
+    #[test]
+    fn hybrid_plans_resolve_across_crystal_and_memory_providers() {
+        let crystal = FixtureProvider::new(vec![seed("FIX-C", 0.9, 0.9)]);
+        let memory = FixtureProvider::with_domain(
+            crate::grow::DOMAIN_MEMORY,
+            vec![Resolved {
+                provider: PROVIDER_FIXTURE,
+                id: "GLYPH-000001".into(),
+                class: "IdentityGlyph".into(),
+                persistence: 0.8,
+                noise_tolerance: 0.7,
+                material: "hrm".into(),
+            }],
+        );
+        let src = r#"
+            cell Pair()   { when always => split Seed(), Mirror() }
+            cell Seed()   { when always => base "Memory Seed" }
+            cell Mirror() { when always => base memory.glyph "Identity Glyph" }
+            grow Pair()
+        "#;
+        let mut plan = grow(&parse(src).unwrap()).unwrap();
+        resolve_plan(&mut plan, &[&crystal, &memory]);
+
+        assert_eq!(unresolved_count(&plan), 0, "both domains resolve");
+        assert_eq!(plan.registry_snapshots.len(), 2);
+        let domains: Vec<_> = plan.leaves.iter().map(|l| l.domain.as_str()).collect();
+        assert_eq!(domains, vec!["crystal", "memory"]);
+        assert_eq!(plan.leaves[1].resolved.as_ref().unwrap().id, "GLYPH-000001");
     }
 
     #[test]
@@ -600,7 +640,7 @@ mod tests {
             grow Ghost()
         "#;
         let mut plan = grow(&parse(src).unwrap()).unwrap();
-        resolve_plan(&mut plan, &reg);
+        resolve_plan(&mut plan, &[&reg]);
 
         let resolved: Vec<_> = plan
             .leaves
