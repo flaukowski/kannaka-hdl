@@ -92,15 +92,15 @@ pub fn emit_crystal(plan: &Plan) -> String {
         if bridge.resolved.is_none() && !speculate {
             out.push_str(&format!(
                 "# STUB unresolved bridge \"{}\" — no pulse emitted\n",
-                bridge.class
+                bridge.query.class
             ));
             continue;
         }
         let (mx, my) = ((bridge.x1 + bridge.x2) / 2.0, (bridge.y1 + bridge.y2) / 2.0);
-        let freq = class_frequency(&bridge.class);
+        let freq = class_frequency(&bridge.query.class);
         out.push_str(&format!(
             "PULSE {mx:.4} {my:.4} 0.05 0.600 {freq:.3} 0.0   # bridge {}\n",
-            bridge.class
+            bridge.query.class
         ));
     }
     out.push_str("RESONATE 400\nDREAM deep\nSTABILIZE\n");
@@ -190,7 +190,7 @@ mod tests {
         assert_eq!(v["leaves"].as_array().unwrap().len(), 4);
         assert_eq!(v["bridges"].as_array().unwrap().len(), 3);
         assert_eq!(v["lowering_model"], LOWERING_JSON);
-        assert_eq!(v["schema_version"], "1");
+        assert_eq!(v["schema_version"], "2");
         assert_eq!(v["unresolved_mode"], "speculative");
     }
 

@@ -31,13 +31,15 @@ pub enum GrowError {
     Runaway,
 }
 
-/// The one component domain the compiler resolves today. ADR-0002 plans
-/// for `memory`, `swarm`, and `hybrid` domains; until queries carry a
-/// domain of their own (Phase 3) every leaf and bridge is Crystal's.
+/// The component domain the compiler can resolve today. Queries may
+/// name other domains (`memory.glyph`, `swarm.agent`); until their
+/// providers arrive they resolve to an honest warning.
 pub const DOMAIN_CRYSTAL: &str = "crystal";
 
 /// Version of the Abstract Holographic Plan schema (ADR-0002 §7).
-pub const PLAN_SCHEMA_VERSION: &str = "1";
+/// "2": queries are typed (domain/type/floors/strategy) and bridges are
+/// typed couplings carrying a full query instead of a bare class.
+pub const PLAN_SCHEMA_VERSION: &str = "2";
 
 /// How a plan treats unresolved components (ADR-0002 §10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -54,7 +56,7 @@ pub enum UnresolvedMode {
 #[derive(Debug, Clone, Serialize)]
 pub struct Leaf {
     pub cell: String,
-    pub domain: &'static str,
+    pub domain: String,
     pub x: f64,
     pub y: f64,
     pub w: f64,
@@ -65,17 +67,25 @@ pub struct Leaf {
     pub resolved: Option<crate::registry::Resolved>,
 }
 
+/// A typed coupling between sibling regions (ADR-0002 §5). The `bridge`
+/// keyword is sugar for a resonance-bridge coupling; the query carries
+/// the same typed attributes as a `base` case.
 #[derive(Debug, Clone, Serialize)]
 pub struct Bridge {
-    pub domain: &'static str,
+    pub domain: String,
+    pub coupling_type: &'static str,
     pub x1: f64,
     pub y1: f64,
     pub x2: f64,
     pub y2: f64,
     pub depth: usize,
-    pub class: String,
+    pub query: Query,
     pub resolved: Option<crate::registry::Resolved>,
 }
+
+/// The one coupling type the `bridge` keyword produces today; `couple`
+/// syntax with more types (ADR-0002 §5) arrives with later phases.
+pub const COUPLING_RESONANCE_BRIDGE: &str = "resonance_bridge";
 
 /// The Abstract Holographic Plan — KannakaHDL's stable intermediate
 /// representation (ADR-0002 §7). Versioned, hashed, and honest about
@@ -214,7 +224,7 @@ impl<'a> Grower<'a> {
                 Action::Base(query) => {
                     self.leaves.push(Leaf {
                         cell: def.name.clone(),
-                        domain: DOMAIN_CRYSTAL,
+                        domain: query.domain.clone(),
                         x: region.x,
                         y: region.y,
                         w: region.w,
@@ -249,18 +259,19 @@ impl<'a> Grower<'a> {
                         child_regions.push(sub);
                         self.instantiate(child, &env, sub, depth + 1)?;
                     }
-                    if let Some(class) = bridge {
+                    if let Some(bridge_query) = bridge {
                         for pair in child_regions.windows(2) {
                             let (x1, y1) = pair[0].center();
                             let (x2, y2) = pair[1].center();
                             self.bridges.push(Bridge {
-                                domain: DOMAIN_CRYSTAL,
+                                domain: bridge_query.domain.clone(),
+                                coupling_type: COUPLING_RESONANCE_BRIDGE,
                                 x1,
                                 y1,
                                 x2,
                                 y2,
                                 depth,
-                                class: class.clone(),
+                                query: bridge_query.clone(),
                                 resolved: None,
                             });
                         }
@@ -359,7 +370,7 @@ mod tests {
     #[test]
     fn plan_carries_schema_identity() {
         let plan = grow(&parse(BANK).unwrap()).unwrap();
-        assert_eq!(plan.schema_version, "1");
+        assert_eq!(plan.schema_version, "2");
         assert_eq!(plan.compiler_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(plan.unresolved_mode, UnresolvedMode::Speculative);
         assert!(plan.leaves.iter().all(|l| l.domain == DOMAIN_CRYSTAL));

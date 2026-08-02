@@ -1,0 +1,19 @@
+# ADR-0002 Phase 3 syntax: typed queries, floors, and strategies.
+#
+# A four-seed bank that spreads resolution across distinct discovered
+# primitives (strategy diverse), bridged by the most noise-tolerant
+# harmonic bridge available (strategy robust) — plus a memory-domain
+# glyph mirror that stays honestly unresolved until a Memory provider
+# arrives (ADR-0002 Phase 4).
+
+cell HybridBank(n) {
+    when n > 1  => split HybridBank(n / 2), HybridBank(n / 2) bridge "Harmonic Bridge" strategy robust
+    when always => base crystal.primitive "Memory Seed" min_noise_tolerance 0.5 strategy diverse
+}
+
+cell GlyphMirror() {
+    when always => base memory.glyph "Identity Glyph"
+}
+
+grow HybridBank(4)
+grow GlyphMirror()

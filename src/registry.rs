@@ -48,9 +48,21 @@ pub trait Provider {
     /// A snapshot of this provider's current evidence source, recorded
     /// in the plan so resolution is reproducible.
     fn snapshot(&self) -> RegistrySnapshot;
-    /// Answer a query; `None` means this provider has no component
-    /// satisfying it (which is a research TODO, not an error).
-    fn resolve_query(&self, query: &Query) -> Option<Resolved>;
+    /// Whether this provider can resolve the given component type
+    /// (`base crystal.primitive …`). Untyped queries always pass.
+    fn supports_type(&self, component_type: &str) -> bool;
+    /// Every component satisfying the query's filters — strategy
+    /// selection over the candidates happens in [`resolve_plan`]
+    /// (ADR-0002 §9).
+    fn candidates(&self, query: &Query) -> Vec<Resolved>;
+    /// Best single answer (highest persistence); `None` means this
+    /// provider has no component satisfying the query (a research
+    /// TODO, not an error).
+    fn resolve_query(&self, query: &Query) -> Option<Resolved> {
+        self.candidates(query)
+            .into_iter()
+            .max_by(|a, b| a.persistence.total_cmp(&b.persistence))
+    }
 }
 
 /// What a resolved query carries into the plan.
@@ -169,12 +181,27 @@ impl Provider for Registry {
         }
     }
 
-    fn resolve_query(&self, query: &Query) -> Option<Resolved> {
-        self.resolve(
-            &query.class,
-            query.min_persistence,
-            query.material.as_deref(),
-        )
+    fn supports_type(&self, component_type: &str) -> bool {
+        component_type == "primitive"
+    }
+
+    fn candidates(&self, query: &Query) -> Vec<Resolved> {
+        let want = normalize(&query.class);
+        self.primitives
+            .iter()
+            .filter(|p| normalize(&p.class) == want)
+            .filter(|p| p.persistence >= query.min_persistence)
+            .filter(|p| p.noise_tolerance >= query.min_noise_tolerance)
+            .filter(|p| query.material.as_deref().is_none_or(|m| p.material_id == m))
+            .map(|p| Resolved {
+                provider: PROVIDER_CRYSTAL,
+                id: p.id.clone(),
+                class: p.class.clone(),
+                persistence: p.persistence,
+                noise_tolerance: p.noise_tolerance,
+                material: p.material_id.clone(),
+            })
+            .collect()
     }
 }
 
@@ -214,18 +241,117 @@ impl Provider for FixtureProvider {
         }
     }
 
-    fn resolve_query(&self, query: &Query) -> Option<Resolved> {
+    fn supports_type(&self, _component_type: &str) -> bool {
+        true
+    }
+
+    fn candidates(&self, query: &Query) -> Vec<Resolved> {
         let want = normalize(&query.class);
         self.components
             .iter()
             .filter(|c| normalize(&c.class) == want)
             .filter(|c| c.persistence >= query.min_persistence)
+            .filter(|c| c.noise_tolerance >= query.min_noise_tolerance)
             .filter(|c| query.material.as_deref().is_none_or(|m| c.material == m))
-            .max_by(|a, b| a.persistence.total_cmp(&b.persistence))
             .map(|c| Resolved {
                 provider: PROVIDER_FIXTURE,
                 ..c.clone()
             })
+            .collect()
+    }
+}
+
+/// Per-plan resolution state for stateful strategies (ADR-0002 §9):
+/// `unique` claims component ids plan-wide; `diverse` round-robins per
+/// domain/class.
+#[derive(Default)]
+struct StrategyState {
+    claimed: std::collections::HashSet<String>,
+    cursors: std::collections::HashMap<String, usize>,
+}
+
+/// Resolve one query. Returns the pick, or `None` plus the reason it
+/// could not be satisfied.
+fn resolve_component(
+    provider: &dyn Provider,
+    query: &Query,
+    state: &mut StrategyState,
+) -> (Option<Resolved>, Option<String>) {
+    use crate::parser::Strategy;
+
+    if query.domain != provider.domain() {
+        return (
+            None,
+            Some(format!(
+                "no provider for domain \"{}\" — Memory and Swarm providers arrive with later ADR-0002 phases",
+                query.domain
+            )),
+        );
+    }
+    if let Some(t) = &query.component_type {
+        if !provider.supports_type(t) {
+            return (
+                None,
+                Some(format!(
+                    "provider {} does not resolve component type \"{}\"",
+                    provider.id(),
+                    t
+                )),
+            );
+        }
+    }
+    let mut candidates = provider.candidates(query);
+    candidates.sort_by(|a, b| b.persistence.total_cmp(&a.persistence));
+    if candidates.is_empty() {
+        let noise = if query.min_noise_tolerance > 0.0 {
+            format!(", min_noise_tolerance {}", query.min_noise_tolerance)
+        } else {
+            String::new()
+        };
+        let material = query
+            .material
+            .as_deref()
+            .map(|m| format!(", material {m}"))
+            .unwrap_or_default();
+        return (
+            None,
+            Some(format!(
+                "no component (class \"{}\", min_persistence {}{noise}{material}) — swarm has not grown one yet",
+                query.class, query.min_persistence
+            )),
+        );
+    }
+    match query.strategy {
+        Strategy::Best => (Some(candidates.swap_remove(0)), None),
+        Strategy::Robust => (
+            candidates
+                .into_iter()
+                .max_by(|a, b| a.noise_tolerance.total_cmp(&b.noise_tolerance)),
+            None,
+        ),
+        Strategy::Unique => match candidates
+            .into_iter()
+            .find(|c| !state.claimed.contains(&c.id))
+        {
+            Some(c) => {
+                state.claimed.insert(c.id.clone());
+                (Some(c), None)
+            }
+            None => (
+                None,
+                Some(format!(
+                    "unique strategy exhausted for class \"{}\" — every matching component is already claimed",
+                    query.class
+                )),
+            ),
+        },
+        Strategy::Diverse => {
+            let key = format!("{}/{}", query.domain, normalize(&query.class));
+            let cursor = state.cursors.entry(key).or_insert(0);
+            let pick = candidates[*cursor % candidates.len()].clone();
+            *cursor += 1;
+            (Some(pick), None)
+        }
     }
 }
 
@@ -235,28 +361,22 @@ impl Provider for FixtureProvider {
 /// research TODO, not a crash). Strict mode turns those warnings into
 /// failure at the CLI layer.
 pub fn resolve_plan(plan: &mut Plan, provider: &dyn Provider) {
+    let mut state = StrategyState::default();
+
     for leaf in &mut plan.leaves {
-        leaf.resolved = provider.resolve_query(&leaf.query);
-        if leaf.resolved.is_none() {
-            plan.warnings.push(format!(
-                "no primitive for {} (class \"{}\", min_persistence {}{}) — swarm has not grown one yet",
-                leaf.cell,
-                leaf.query.class,
-                leaf.query.min_persistence,
-                leaf.query
-                    .material
-                    .as_deref()
-                    .map(|m| format!(", material {m}"))
-                    .unwrap_or_default()
-            ));
+        let (resolved, reason) = resolve_component(provider, &leaf.query, &mut state);
+        leaf.resolved = resolved;
+        if let Some(reason) = reason {
+            plan.warnings.push(format!("{}: {reason}", leaf.cell));
         }
     }
     for bridge in &mut plan.bridges {
-        bridge.resolved = provider.resolve_query(&Query {
-            class: bridge.class.clone(),
-            min_persistence: 0.0,
-            material: None,
-        });
+        let (resolved, reason) = resolve_component(provider, &bridge.query, &mut state);
+        bridge.resolved = resolved;
+        if let Some(reason) = reason {
+            plan.warnings
+                .push(format!("coupling \"{}\": {reason}", bridge.query.class));
+        }
     }
     plan.warnings.dedup();
 
@@ -335,12 +455,115 @@ mod tests {
         assert_eq!(plan.registry_snapshots[0].provider, PROVIDER_FIXTURE);
         assert_eq!(plan.registry_snapshots[0].source, "(static fixture)");
         // Same query semantics as the Crystal registry: floor excludes.
-        let q = crate::parser::Query {
-            class: "Memory Seed".into(),
-            min_persistence: 0.95,
+        assert!(fixture.resolve_query(&query("Memory Seed", 0.95)).is_none());
+    }
+
+    /// A crystal-domain query with defaults, floors aside.
+    fn query(class: &str, min_persistence: f64) -> Query {
+        Query {
+            domain: "crystal".into(),
+            component_type: None,
+            class: class.into(),
+            min_persistence,
+            min_noise_tolerance: 0.0,
             material: None,
-        };
-        assert!(fixture.resolve_query(&q).is_none());
+            strategy: crate::parser::Strategy::Best,
+        }
+    }
+
+    fn seed(id: &str, persistence: f64, noise_tolerance: f64) -> Resolved {
+        Resolved {
+            provider: PROVIDER_FIXTURE,
+            id: id.into(),
+            class: "MemorySeed".into(),
+            persistence,
+            noise_tolerance,
+            material: "ideal_resonator".into(),
+        }
+    }
+
+    const UNBRIDGED_BANK: &str = r#"
+        cell Bank(n) {
+            when n > 1  => split Bank(n / 2), Bank(n / 2)
+            when always => base "Memory Seed" strategy STRAT
+        }
+        grow Bank(4)
+    "#;
+
+    #[test]
+    fn robust_strategy_prefers_noise_tolerance_over_persistence() {
+        let fixture = FixtureProvider::new(vec![seed("FIX-A", 0.9, 0.5), seed("FIX-B", 0.5, 0.95)]);
+        let mut q = query("Memory Seed", 0.0);
+        q.strategy = crate::parser::Strategy::Robust;
+        let mut state = StrategyState::default();
+        let (picked, _) = resolve_component(&fixture, &q, &mut state);
+        assert_eq!(picked.unwrap().id, "FIX-B");
+    }
+
+    #[test]
+    fn unique_strategy_claims_distinct_components_then_warns() {
+        let fixture = FixtureProvider::new(vec![
+            seed("FIX-A", 0.9, 0.5),
+            seed("FIX-B", 0.8, 0.5),
+            seed("FIX-C", 0.7, 0.5),
+        ]);
+        let src = UNBRIDGED_BANK.replace("STRAT", "unique");
+        let mut plan = grow(&parse(&src).unwrap()).unwrap();
+        resolve_plan(&mut plan, &fixture);
+
+        let ids: std::collections::HashSet<_> = plan
+            .leaves
+            .iter()
+            .filter_map(|l| l.resolved.as_ref())
+            .map(|r| r.id.clone())
+            .collect();
+        assert_eq!(ids.len(), 3, "three distinct components claimed");
+        assert_eq!(unresolved_count(&plan), 1, "fourth leaf exhausts the pool");
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|w| w.contains("unique strategy exhausted")));
+    }
+
+    #[test]
+    fn diverse_strategy_round_robins_candidates() {
+        let fixture = FixtureProvider::new(vec![seed("FIX-A", 0.9, 0.5), seed("FIX-B", 0.8, 0.5)]);
+        let src = UNBRIDGED_BANK.replace("STRAT", "diverse");
+        let mut plan = grow(&parse(&src).unwrap()).unwrap();
+        resolve_plan(&mut plan, &fixture);
+
+        assert_eq!(unresolved_count(&plan), 0);
+        let ids: Vec<_> = plan
+            .leaves
+            .iter()
+            .map(|l| l.resolved.as_ref().unwrap().id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["FIX-A", "FIX-B", "FIX-A", "FIX-B"]);
+    }
+
+    #[test]
+    fn foreign_domains_resolve_to_an_honest_warning() {
+        let fixture = FixtureProvider::new(vec![seed("FIX-A", 0.9, 0.5)]);
+        let src = r#"
+            cell M() { when always => base memory.glyph "Identity Glyph" }
+            grow M()
+        "#;
+        let mut plan = grow(&parse(src).unwrap()).unwrap();
+        resolve_plan(&mut plan, &fixture);
+        assert_eq!(unresolved_count(&plan), 1);
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|w| w.contains("no provider for domain \"memory\"")));
+        assert_eq!(plan.leaves[0].domain, "memory");
+    }
+
+    #[test]
+    fn noise_tolerance_floor_filters_candidates() {
+        let fixture = FixtureProvider::new(vec![seed("FIX-A", 0.9, 0.3), seed("FIX-B", 0.5, 0.9)]);
+        let mut q = query("Memory Seed", 0.0);
+        q.min_noise_tolerance = 0.8;
+        assert_eq!(fixture.resolve_query(&q).unwrap().id, "FIX-B");
     }
 
     #[test]

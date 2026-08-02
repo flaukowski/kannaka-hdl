@@ -2,6 +2,37 @@
 
 All notable changes to kannaka-hdl are documented here.
 
+## v0.3.0 — 2026-08-02
+
+ADR-0002 Phase 3: typed component queries and resolution strategies.
+
+### Added
+- **Typed queries** (ADR-0002 §3): optional `domain.type` prefix —
+  `base memory.glyph "Identity Glyph"`, `base crystal.primitive "Memory
+  Seed"`. Unnamed domains default to `crystal`. Domains without a
+  provider resolve to an honest warning ("no provider for domain") —
+  never a parse error, never a silent approximation.
+- **`min_noise_tolerance` floor** alongside `min_persistence`.
+  (Evidence-level floors wait for evidence fields in the registry —
+  kannaka-crystal ADR-0004.)
+- **Resolution strategies** (ADR-0002 §9): `strategy best` (default,
+  highest persistence — the historical behavior), `robust` (highest
+  noise tolerance), `unique` (each resolution claims a component no
+  other unique query got; exhaustion warns), `diverse` (round-robin
+  across candidates). `unique`/`diverse` are stateful per plan, and
+  every decision lands in the emitted plan.
+- **Bridges are typed couplings** (ADR-0002 §5): `bridge` takes the
+  same attributes as `base` (floors, material, strategy); bridge
+  entries carry a `coupling_type` (`resonance_bridge`) and a full
+  `query`; unresolved couplings now warn like leaves do.
+
+### Changed
+- **Plan `schema_version` is now "2"**: bridge entries serialize
+  `coupling_type` + `query` instead of a bare `class`, and leaf/bridge
+  `domain` comes from the query.
+- `Provider` gains `supports_type` and `candidates`; strategy selection
+  happens in `resolve_plan` over the candidate set.
+
 ## v0.2.0 — 2026-08-02
 
 ADR-0002 Phases 1–2: HDL now officially stands for **Holographic

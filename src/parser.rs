@@ -54,18 +54,43 @@ pub struct Call {
     pub args: Vec<Expr>,
 }
 
+/// How a query picks among matching candidates (ADR-0002 §9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Strategy {
+    /// Highest persistence (the historical behavior).
+    Best,
+    /// Highest noise tolerance.
+    Robust,
+    /// Each resolution claims a component no other `unique` query got.
+    Unique,
+    /// Round-robin across candidates, spreading resolutions out.
+    Diverse,
+}
+
+/// A typed component query (ADR-0002 §3): domain + optional component
+/// type + class + floors + strategy. `base "Class"` still works —
+/// domain defaults to `crystal` — and `base memory.glyph "Identity"`
+/// names a domain whose provider hasn't arrived yet (an honest
+/// unresolved, not a parse error).
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Query {
+    pub domain: String,
+    pub component_type: Option<String>,
     pub class: String,
     pub min_persistence: f64,
+    pub min_noise_tolerance: f64,
     pub material: Option<String>,
+    pub strategy: Strategy,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Split {
         children: Vec<Call>,
-        bridge: Option<String>,
+        /// A typed coupling query between consecutive siblings —
+        /// `bridge` takes the same attributes as `base` (ADR-0002 §5).
+        bridge: Option<Query>,
     },
     Base(Query),
 }
@@ -187,6 +212,7 @@ fn lex(source: &str) -> Result<Vec<(Tok, usize)>, ParseError> {
                     }
                     '<' => "<",
                     '>' => ">",
+                    '.' => ".",
                     '(' => "(",
                     ')' => ")",
                     '{' => "{",
@@ -275,6 +301,7 @@ impl Parser {
                 "-" => "-",
                 "*" => "*",
                 "/" => "/",
+                "." => ".",
                 _ => return false,
             }))
         {
@@ -359,6 +386,69 @@ impl Parser {
         Ok(Call { cell, args })
     }
 
+    fn expect_number(&mut self) -> Result<f64, ParseError> {
+        match self.next() {
+            Some(Tok::Float(v)) => Ok(v),
+            Some(Tok::Int(v)) => Ok(v as f64),
+            other => Err(self.err(format!("expected number, got {other:?}"))),
+        }
+    }
+
+    /// A typed component query: `[domain.type] "Class" [attrs...]` —
+    /// shared by `base` and `bridge` (ADR-0002 §3, §5).
+    fn parse_query(&mut self) -> Result<Query, ParseError> {
+        let (domain, component_type) = if matches!(self.peek(), Some(Tok::Ident(_))) {
+            let domain = self.expect_ident()?;
+            self.expect_punct(".")?;
+            (domain, Some(self.expect_ident()?))
+        } else {
+            ("crystal".to_string(), None)
+        };
+        let class = self.expect_str()?;
+        let mut query = Query {
+            domain,
+            component_type,
+            class,
+            min_persistence: 0.0,
+            min_noise_tolerance: 0.0,
+            material: None,
+            strategy: Strategy::Best,
+        };
+        loop {
+            match self.peek() {
+                Some(Tok::Ident(k)) if k == "min_persistence" => {
+                    self.pos += 1;
+                    query.min_persistence = self.expect_number()?;
+                }
+                Some(Tok::Ident(k)) if k == "min_noise_tolerance" => {
+                    self.pos += 1;
+                    query.min_noise_tolerance = self.expect_number()?;
+                }
+                Some(Tok::Ident(k)) if k == "material" => {
+                    self.pos += 1;
+                    query.material = Some(self.expect_str()?);
+                }
+                Some(Tok::Ident(k)) if k == "strategy" => {
+                    self.pos += 1;
+                    let name = self.expect_ident()?;
+                    query.strategy = match name.as_str() {
+                        "best" => Strategy::Best,
+                        "robust" => Strategy::Robust,
+                        "unique" => Strategy::Unique,
+                        "diverse" => Strategy::Diverse,
+                        other => {
+                            return Err(self.err(format!(
+                                "unknown strategy `{other}` (best | robust | unique | diverse)"
+                            )))
+                        }
+                    };
+                }
+                _ => break,
+            }
+        }
+        Ok(query)
+    }
+
     fn parse_action(&mut self) -> Result<Action, ParseError> {
         match self.next() {
             Some(Tok::Ident(kw)) if kw == "split" => {
@@ -369,38 +459,11 @@ impl Parser {
                 let mut bridge = None;
                 if self.peek() == Some(&Tok::Ident("bridge".into())) {
                     self.pos += 1;
-                    bridge = Some(self.expect_str()?);
+                    bridge = Some(self.parse_query()?);
                 }
                 Ok(Action::Split { children, bridge })
             }
-            Some(Tok::Ident(kw)) if kw == "base" => {
-                let class = self.expect_str()?;
-                let mut query = Query {
-                    class,
-                    min_persistence: 0.0,
-                    material: None,
-                };
-                loop {
-                    match self.peek() {
-                        Some(Tok::Ident(k)) if k == "min_persistence" => {
-                            self.pos += 1;
-                            query.min_persistence = match self.next() {
-                                Some(Tok::Float(v)) => v,
-                                Some(Tok::Int(v)) => v as f64,
-                                other => {
-                                    return Err(self.err(format!("expected number, got {other:?}")))
-                                }
-                            };
-                        }
-                        Some(Tok::Ident(k)) if k == "material" => {
-                            self.pos += 1;
-                            query.material = Some(self.expect_str()?);
-                        }
-                        _ => break,
-                    }
-                }
-                Ok(Action::Base(query))
-            }
+            Some(Tok::Ident(kw)) if kw == "base" => Ok(Action::Base(self.parse_query()?)),
             other => Err(self.err(format!("expected `split` or `base`, got {other:?}"))),
         }
     }
@@ -494,19 +557,61 @@ mod tests {
         match &prog.cells[0].rules[0].action {
             Action::Split { children, bridge } => {
                 assert_eq!(children.len(), 2);
-                assert_eq!(bridge.as_deref(), Some("Harmonic Bridge"));
+                let bq = bridge.as_ref().unwrap();
+                assert_eq!(bq.class, "Harmonic Bridge");
+                assert_eq!(bq.domain, "crystal");
+                assert_eq!(bq.strategy, Strategy::Best);
             }
             other => panic!("expected split, got {other:?}"),
         }
         match &prog.cells[0].rules[1].action {
             Action::Base(q) => {
                 assert_eq!(q.class, "Memory Seed");
+                assert_eq!(q.domain, "crystal");
+                assert_eq!(q.component_type, None);
                 assert!((q.min_persistence - 0.4).abs() < 1e-9);
+                assert_eq!(q.min_noise_tolerance, 0.0);
                 assert_eq!(q.material.as_deref(), Some("metamaterial"));
+                assert_eq!(q.strategy, Strategy::Best);
             }
             other => panic!("expected base, got {other:?}"),
         }
         assert_eq!(prog.grows.len(), 1);
+    }
+
+    #[test]
+    fn typed_queries_parse_domain_type_floors_and_strategy() {
+        let src = r#"
+            cell X(n) {
+                when n > 1  => split X(n / 2), X(n / 2) bridge "Chiral Link" min_persistence 0.2 strategy robust
+                when always => base memory.glyph "Identity Glyph" min_noise_tolerance 0.6 strategy unique
+            }
+            grow X(2)
+        "#;
+        let prog = parse(src).unwrap();
+        match &prog.cells[0].rules[0].action {
+            Action::Split { bridge, .. } => {
+                let bq = bridge.as_ref().unwrap();
+                assert_eq!(bq.class, "Chiral Link");
+                assert!((bq.min_persistence - 0.2).abs() < 1e-9);
+                assert_eq!(bq.strategy, Strategy::Robust);
+            }
+            other => panic!("expected split, got {other:?}"),
+        }
+        match &prog.cells[0].rules[1].action {
+            Action::Base(q) => {
+                assert_eq!(q.domain, "memory");
+                assert_eq!(q.component_type.as_deref(), Some("glyph"));
+                assert_eq!(q.class, "Identity Glyph");
+                assert!((q.min_noise_tolerance - 0.6).abs() < 1e-9);
+                assert_eq!(q.strategy, Strategy::Unique);
+            }
+            other => panic!("expected base, got {other:?}"),
+        }
+
+        let err =
+            parse("cell X() { when always => base \"Y\" strategy fancy }\ngrow X()").unwrap_err();
+        assert!(err.message.contains("unknown strategy"));
     }
 
     #[test]

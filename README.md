@@ -30,8 +30,9 @@ grow MemoryBank(8)
 ```
 
 - `cell` — a parameterized definition carrying ordered `when … => …` rules; the first guard that holds fires.
-- `split` — divide this cell's region into equal slices (axis alternates per depth, Morpho-style) and recurse; `bridge "<class>"` couples consecutive siblings.
-- `base` — a **registry query**: class + optional `min_persistence` floor + optional `material`. Resolution picks the best discovered primitive; unresolvable queries are warnings ("the swarm hasn't grown one yet"), not errors.
+- `split` — divide this cell's region into equal slices (axis alternates per depth, Morpho-style) and recurse; `bridge "<class>"` couples consecutive siblings as a typed **resonance-bridge coupling**, and takes the same query attributes as `base`.
+- `base` — a **typed component query** (ADR-0002 §3): optional `domain.type` prefix (`base crystal.primitive "Memory Seed"`, `base memory.glyph "Identity Glyph"` — domain defaults to `crystal`), class, optional `min_persistence` / `min_noise_tolerance` floors, optional `material`, optional `strategy`. Unresolvable queries are warnings ("the swarm hasn't grown one yet"), not errors; domains without a provider warn honestly too.
+- `strategy` — how resolution picks among candidates (ADR-0002 §9): `best` (default, highest persistence), `robust` (highest noise tolerance), `unique` (each resolution claims a distinct component; exhaustion warns), `diverse` (round-robin across candidates).
 - Guards are integer expressions over cell parameters (`n > 1`, `n + m * 2 >= (k - 1) / 2`, `always`).
 - Growth is bounded (depth 32, 4096 leaves) — a missing base case is an error, not a hang.
 
