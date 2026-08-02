@@ -3,8 +3,8 @@ use kannaka_hdl::emit;
 use kannaka_hdl::grow::{fnv1a64, grow, UnresolvedMode};
 use kannaka_hdl::parser::parse;
 use kannaka_hdl::registry::{
-    default_path, evaluate_expectations, resolve_plan, unresolved_count, MemoryCliProvider,
-    Provider, Registry,
+    composites_path, default_path, evaluate_expectations, resolve_plan, unresolved_count,
+    CompositeProvider, MemoryCliProvider, Provider, Registry,
 };
 use std::path::PathBuf;
 
@@ -76,6 +76,10 @@ enum Command {
         /// swarm work queue via `kannaka swarm enqueue` (ADR-0002 §14)
         #[arg(long, num_args = 0..=1, default_missing_value = "kannaka")]
         publish_discovery: Option<PathBuf>,
+        /// Register the validated plan as a composite component under
+        /// this name (ADR-0002 §15); requires full resolution
+        #[arg(long, value_name = "NAME")]
+        register_composite: Option<String>,
         #[arg(long, value_enum, default_value = "json")]
         emit: EmitKind,
         /// Output file (default: stdout)
@@ -116,6 +120,7 @@ fn dispatch(command: Command) -> Result<(), String> {
             unresolved,
             memory_provider,
             publish_discovery,
+            register_composite,
             emit,
             out,
         } => {
@@ -154,6 +159,10 @@ fn dispatch(command: Command) -> Result<(), String> {
                 }
                 if let Some(memory) = &memory {
                     providers.push(memory);
+                }
+                let composites = CompositeProvider::load(&composites_path()).ok();
+                if let Some(composites) = &composites {
+                    providers.push(composites);
                 }
                 resolve_plan(&mut plan, &providers);
                 eprintln!(
@@ -200,6 +209,17 @@ fn dispatch(command: Command) -> Result<(), String> {
             }
 
             plan.seal(&source);
+            if let Some(name) = register_composite {
+                let path = composites_path();
+                let composite = kannaka_hdl::registry::register_composite(&plan, &name, &path)?;
+                eprintln!(
+                    "registered composite \"{}\" ({} components, plan {}) at {}",
+                    composite.name,
+                    composite.components.len(),
+                    composite.plan_hash,
+                    path.display()
+                );
+            }
             if !plan.discovery_requests.is_empty() {
                 eprintln!(
                     "{} capability discovery request(s) in plan — publishable to the swarm (ADR-0002 §14)",

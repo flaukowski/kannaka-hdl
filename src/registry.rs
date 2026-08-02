@@ -599,6 +599,146 @@ impl Provider for MemoryCliProvider {
     }
 }
 
+/// The domain and provider id for registered composite architectures.
+pub const DOMAIN_COMPOSITE: &str = "composite";
+pub const PROVIDER_COMPOSITE: &str = "composite-registry";
+
+/// A successfully validated architecture registered as a reusable
+/// component (ADR-0002 §15): program+plan hashes, component
+/// identities, coupling count, worst-case behavioral metrics, and the
+/// expectation verdicts that validated it. Level 3 of the development
+/// ladder — validated architectures become composite primitives.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct Composite {
+    pub name: String,
+    pub program_hash: String,
+    pub plan_hash: String,
+    pub components: Vec<String>,
+    pub couplings: usize,
+    /// Worst case over the plan's resolved components.
+    pub persistence: f64,
+    pub noise_tolerance: f64,
+    /// Expectation verdicts at registration time (the evidence).
+    pub evidence: serde_json::Value,
+}
+
+/// Where composites register by default.
+pub fn composites_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".kannaka-hdl")
+        .join("composites.json")
+}
+
+/// Register a fully resolved plan as a composite component. Refuses
+/// plans with unresolved components — only validated architectures
+/// become primitives. Replaces an existing composite of the same name.
+pub fn register_composite(plan: &Plan, name: &str, path: &Path) -> Result<Composite, String> {
+    if unresolved_count(plan) > 0 {
+        return Err(format!(
+            "cannot register \"{name}\": {} component(s) unresolved — only validated architectures become composites",
+            unresolved_count(plan)
+        ));
+    }
+    let resolved: Vec<&Resolved> = plan
+        .leaves
+        .iter()
+        .filter_map(|l| l.resolved.as_ref())
+        .chain(plan.bridges.iter().filter_map(|b| b.resolved.as_ref()))
+        .collect();
+    let worst = |f: fn(&&Resolved) -> f64| resolved.iter().map(f).fold(f64::INFINITY, f64::min);
+    let composite = Composite {
+        name: name.to_string(),
+        program_hash: plan.program_hash.clone(),
+        plan_hash: plan.plan_hash.clone(),
+        components: resolved.iter().map(|r| r.id.clone()).collect(),
+        couplings: plan.bridges.len(),
+        persistence: worst(|r| r.persistence),
+        noise_tolerance: worst(|r| r.noise_tolerance),
+        evidence: serde_json::to_value(&plan.expectations).map_err(|e| e.to_string())?,
+    };
+    let mut all: Vec<Composite> = match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?,
+        Err(_) => Vec::new(),
+    };
+    all.retain(|c| normalize(&c.name) != normalize(name));
+    all.push(composite.clone());
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(&all).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(composite)
+}
+
+/// Answers `base composite.architecture "Name"` queries from the
+/// composite registry — validated architectures satisfying future base
+/// cases (ADR-0002 §15, acceptance #11).
+pub struct CompositeProvider {
+    pub composites: Vec<Composite>,
+    pub source: PathBuf,
+}
+
+impl CompositeProvider {
+    pub fn load(path: &Path) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(CompositeProvider {
+            composites: serde_json::from_str(&text)
+                .map_err(|e| format!("{}: {e}", path.display()))?,
+            source: path.to_path_buf(),
+        })
+    }
+}
+
+impl Provider for CompositeProvider {
+    fn id(&self) -> &'static str {
+        PROVIDER_COMPOSITE
+    }
+
+    fn domain(&self) -> &'static str {
+        DOMAIN_COMPOSITE
+    }
+
+    fn snapshot(&self) -> RegistrySnapshot {
+        RegistrySnapshot {
+            provider: PROVIDER_COMPOSITE,
+            domain: DOMAIN_COMPOSITE,
+            source: self.source.display().to_string(),
+            primitives: self.composites.len(),
+        }
+    }
+
+    fn supports_type(&self, component_type: &str) -> bool {
+        component_type == "architecture"
+    }
+
+    fn candidates(&self, query: &Query) -> Vec<Resolved> {
+        // Composites have no material; a material floor can't match.
+        if query.material.is_some() {
+            return Vec::new();
+        }
+        let want = normalize(&query.class);
+        self.composites
+            .iter()
+            .filter(|c| normalize(&c.name) == want)
+            .filter(|c| c.persistence >= query.min_persistence)
+            .filter(|c| c.noise_tolerance >= query.min_noise_tolerance)
+            .map(|c| Resolved {
+                provider: PROVIDER_COMPOSITE,
+                id: c.plan_hash.clone(),
+                class: c.name.clone(),
+                persistence: c.persistence,
+                noise_tolerance: c.noise_tolerance,
+                material: "composite".into(),
+                signature: Vec::new(),
+            })
+            .collect()
+    }
+}
+
 /// A declared expectation and its verdict (ADR-0002 §16).
 #[derive(Debug, Clone, Serialize)]
 pub struct Expectation {
@@ -905,6 +1045,45 @@ mod tests {
         let domains: Vec<_> = plan.leaves.iter().map(|l| l.domain.as_str()).collect();
         assert_eq!(domains, vec!["crystal", "memory"]);
         assert_eq!(plan.leaves[1].resolved.as_ref().unwrap().id, "GLYPH-000001");
+    }
+
+    #[test]
+    fn composites_register_and_satisfy_future_base_queries() {
+        let fixture = FixtureProvider::new(vec![seed("FIX-A", 0.7, 0.6), seed("FIX-B", 0.9, 0.8)]);
+        let src = r#"
+            cell Bank(n) {
+                when n > 1  => split Bank(n / 2), Bank(n / 2)
+                when always => base "Memory Seed" strategy unique
+            }
+            grow Bank(2)
+        "#;
+        let mut plan = grow(&parse(src).unwrap()).unwrap();
+        resolve_plan(&mut plan, &[&fixture]);
+        plan.seal(src);
+
+        let dir = std::env::temp_dir().join(format!("khdl-comp-{}", std::process::id()));
+        let path = dir.join("composites.json");
+        let composite = register_composite(&plan, "Seed Pair", &path).unwrap();
+        assert_eq!(composite.components.len(), 2);
+        assert_eq!(composite.plan_hash, plan.plan_hash);
+        assert!((composite.persistence - 0.7).abs() < 1e-9, "worst case");
+
+        // The registered architecture now satisfies a base query.
+        let provider = CompositeProvider::load(&path).unwrap();
+        let mut q = query("Seed Pair", 0.5);
+        q.domain = DOMAIN_COMPOSITE.into();
+        q.component_type = Some("architecture".into());
+        let hit = provider.resolve_query(&q).unwrap();
+        assert_eq!(hit.provider, PROVIDER_COMPOSITE);
+        assert_eq!(hit.id, plan.plan_hash);
+        assert!(provider.resolve_query(&query("Seed Pair", 0.95)).is_none());
+
+        // Unvalidated plans are refused.
+        let mut bare = grow(&parse(src).unwrap()).unwrap();
+        assert!(register_composite(&bare, "Nope", &path).is_err());
+        bare.seal(src);
+        assert!(register_composite(&bare, "Nope", &path).is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

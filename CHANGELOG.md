@@ -2,6 +2,24 @@
 
 All notable changes to kannaka-hdl are documented here.
 
+## v0.8.0 — 2026-08-02
+
+ADR-0002 §15: composite architectures become components — the final
+acceptance criterion (#11). All 12 are now satisfied.
+
+### Added
+- **`--register-composite <NAME>`**: a fully resolved, sealed plan
+  registers into `~/.kannaka-hdl/composites.json` with the §15
+  contract — program/plan hashes, component identities, coupling
+  count, worst-case persistence/noise_tolerance, and the expectation
+  verdicts as evidence. Plans with unresolved components are refused:
+  only validated architectures become primitives.
+- **`CompositeProvider`** (domain `composite`, auto-attached when the
+  registry exists): `base composite.architecture "Name"` resolves a
+  registered architecture, with floors applied against its worst-case
+  metrics — Level 3 of the development ladder, validated architectures
+  satisfying future base queries.
+
 ## v0.7.0 — 2026-08-02
 
 ADR-0002 Phase 5: cross-domain transforms (acceptance #9), built on
