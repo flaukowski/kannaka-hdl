@@ -1,0 +1,22 @@
+# membank-resolved.khdl — membank with seed queries the swarm has already
+# answered, so every leaf resolves to a real discovered primitive.
+#
+# First lab run (2026-08-02, 3,216-primitive registry snapshot) surfaced a
+# genuine H3 finding: this resolved bank UNDERPERFORMED the unresolved
+# membank.khdl (26% vs 47% persistence of crystallized structures) —
+# because resolution also chooses the field material. The resolved seeds
+# were metamaterial-discovered, and metamaterial dissipates hard under
+# deep dreams, while membank's unresolved fallback ran in ideal_resonator
+# and GAINED energy through consolidation (423 -> 468). Architecture
+# quality is coupled to medium choice; surfacing that is the point.
+#
+# Run it (isolated lab — see README "Running grown architectures"):
+#   kannaka-hdl grow examples/membank-resolved.khdl --emit crystal -o bank.crystal
+#   KANNAKA_CRYSTAL_DATA_DIR=/tmp/bank-lab kannaka-crystal run bank.crystal
+
+cell MemoryBank(n) {
+    when n > 1  => split MemoryBank(n / 2), MemoryBank(n / 2) bridge "Harmonic Bridge"
+    when always => base "Standing Echo" min_persistence 0.5
+}
+
+grow MemoryBank(8)

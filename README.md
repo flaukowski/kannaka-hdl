@@ -45,6 +45,19 @@ kannaka-crystal run bank.crystal                              # instantiate + ST
 
 Resolution reads kannaka-crystal's registry (`--registry`, else `$KANNAKA_CRYSTAL_DATA_DIR/registry.json`, else `~/.kannaka-crystal/registry.json`). Installed beside the `kannaka` CLI it is discovered as a plugin: `kannaka hdl grow …`.
 
+### Running grown architectures (isolated lab)
+
+Run `.crystal` output against a **snapshot copy** of the registry, not the live data dir — a running archivist saves every few seconds and last-writer-wins will eat your run's STABILIZE registrations (learned live; kannaka-crystal ADR-0002):
+
+```bash
+mkdir lab && cp ~/.kannaka-crystal/registry.json lab/
+kannaka-hdl grow examples/membank.khdl --emit crystal -o bank.crystal
+KANNAKA_CRYSTAL_DATA_DIR=./lab kannaka-crystal run bank.crystal
+KANNAKA_CRYSTAL_DATA_DIR=./lab kannaka-crystal primitives   # what the bank crystallized
+```
+
+First lab result worth knowing: **resolution also chooses the field material** (most common among resolved primitives), and the medium dominates outcomes — a resolved bank in dissipative metamaterial crystallized weaker structures than the same architecture's unresolved fallback in `ideal_resonator`. See `examples/membank-resolved.khdl`.
+
 ## Emitters
 
 | target | what you get |
