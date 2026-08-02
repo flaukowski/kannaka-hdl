@@ -1,9 +1,12 @@
 # Claude Code Configuration — kannaka-hdl
 
-KannakaHDL: a growth language for informational materials — architectures
+KannakaHDL: the Holographic Development Language (ADR-0002) — architectures
 grown by rewrite rules whose base cases are registry queries against
-kannaka-crystal's discovered primitives. See
-`docs/adr/0001-language-design.md`, especially the "ports" caveat.
+discovered components (today: kannaka-crystal's primitives). Compilation
+emits a versioned, hashed Abstract Holographic Plan with an explicit
+strict/stub/speculative unresolved-component mode. See
+`docs/adr/0001-language-design.md` (the "ports" caveat) and
+`docs/adr/0002-holographic-development-language.md` (the roadmap).
 
 ## Rules
 

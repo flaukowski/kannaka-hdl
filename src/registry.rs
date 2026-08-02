@@ -26,14 +26,39 @@ struct RawRegistry {
     primitives: Vec<RawPrimitive>,
 }
 
+/// The provider identifier this resolver answers as (ADR-0002 §2).
+/// Phase 2 will put this behind a generic provider interface; for now
+/// the Crystal registry is the only provider and says so explicitly.
+pub const PROVIDER_CRYSTAL: &str = "crystal-registry";
+
 /// What a resolved query carries into the plan.
 #[derive(Debug, Clone, Serialize)]
 pub struct Resolved {
+    pub provider: &'static str,
     pub id: String,
     pub class: String,
     pub persistence: f64,
     pub noise_tolerance: f64,
     pub material: String,
+}
+
+/// A record of which registry resolution consulted (ADR-0002 §7) — the
+/// plan names its evidence sources instead of leaving them implicit.
+#[derive(Debug, Clone, Serialize)]
+pub struct RegistrySnapshot {
+    pub provider: &'static str,
+    pub domain: &'static str,
+    pub source: String,
+    pub primitives: usize,
+}
+
+/// Resolution outcome counts, recorded in the plan (ADR-0002 §7).
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolutionReport {
+    pub leaves_total: usize,
+    pub leaves_resolved: usize,
+    pub bridges_total: usize,
+    pub bridges_resolved: usize,
 }
 
 pub struct Registry {
@@ -94,6 +119,7 @@ impl Registry {
             .filter(|p| material.is_none_or(|m| p.material_id == m))
             .max_by(|a, b| a.persistence.total_cmp(&b.persistence))
             .map(|p| Resolved {
+                provider: PROVIDER_CRYSTAL,
                 id: p.id.clone(),
                 class: p.class.clone(),
                 persistence: p.persistence,
@@ -131,6 +157,26 @@ pub fn resolve_plan(plan: &mut Plan, registry: &Registry) {
         bridge.resolved = registry.resolve(&bridge.class, 0.0, None);
     }
     plan.warnings.dedup();
+
+    plan.registry_snapshots.push(RegistrySnapshot {
+        provider: PROVIDER_CRYSTAL,
+        domain: crate::grow::DOMAIN_CRYSTAL,
+        source: registry.source.display().to_string(),
+        primitives: registry.len(),
+    });
+    plan.resolution_report = Some(ResolutionReport {
+        leaves_total: plan.leaves.len(),
+        leaves_resolved: plan.leaves.iter().filter(|l| l.resolved.is_some()).count(),
+        bridges_total: plan.bridges.len(),
+        bridges_resolved: plan.bridges.iter().filter(|b| b.resolved.is_some()).count(),
+    });
+}
+
+/// How many required components a resolved plan still lacks — what
+/// `strict` mode refuses to ship (ADR-0002 §10).
+pub fn unresolved_count(plan: &Plan) -> usize {
+    plan.leaves.iter().filter(|l| l.resolved.is_none()).count()
+        + plan.bridges.iter().filter(|b| b.resolved.is_none()).count()
 }
 
 #[cfg(test)]
@@ -201,6 +247,23 @@ mod tests {
             "Phase Knot unresolved -> one warning"
         );
         assert!(plan.warnings[0].contains("Phase Knot"));
+
+        // ADR-0002 Phase 1: the plan names its evidence sources and
+        // records resolution outcomes.
+        assert_eq!(plan.registry_snapshots.len(), 1);
+        assert_eq!(plan.registry_snapshots[0].provider, PROVIDER_CRYSTAL);
+        assert_eq!(plan.registry_snapshots[0].primitives, 3);
+        let report = plan.resolution_report.as_ref().unwrap();
+        assert_eq!(report.leaves_total, 5);
+        assert_eq!(report.leaves_resolved, 4);
+        assert_eq!(report.bridges_total, 3);
+        assert_eq!(report.bridges_resolved, 3);
+        assert_eq!(unresolved_count(&plan), 1);
+        assert!(plan
+            .leaves
+            .iter()
+            .filter_map(|l| l.resolved.as_ref())
+            .all(|r| r.provider == PROVIDER_CRYSTAL));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

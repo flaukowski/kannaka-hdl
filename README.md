@@ -47,6 +47,12 @@ kannaka-crystal run bank.crystal                              # instantiate + ST
 
 Resolution reads kannaka-crystal's registry (`--registry`, else `$KANNAKA_CRYSTAL_DATA_DIR/registry.json`, else `~/.kannaka-crystal/registry.json`). Installed beside the `kannaka` CLI it is discovered as a plugin: `kannaka hdl grow …`.
 
+Unresolved components follow an explicit policy (`--unresolved`, ADR-0002 §10): **`speculative`** (default) lets backends approximate them — the historical proxy-pulse behavior; **`stub`** keeps them declared-but-inert (no pulses); **`strict`** fails the build — use it for scientific runs:
+
+```bash
+kannaka-hdl grow examples/membank.khdl --unresolved strict --emit crystal -o bank.crystal
+```
+
 ### Running grown architectures (isolated lab)
 
 Run `.crystal` output against a **snapshot copy** of the registry, not the live data dir — a running archivist saves every few seconds and last-writer-wins will eat your run's STABILIZE registrations (learned live; kannaka-crystal ADR-0002):
@@ -70,7 +76,7 @@ First lab result worth knowing: **resolution also chooses the field material** (
 
 ## Status
 
-v0.1 — experimental, evolving separately from kannaka-crystal on purpose. The trajectory is set by [ADR-0002 (Holographic Development Language)](docs/adr/0002-holographic-development-language.md): typed component queries over multiple providers (Crystal / Memory / Swarm / Hybrid), typed couplings replacing geometric bridges, a domain-neutral Abstract Holographic Plan IR, strict/stub/speculative resolution modes, and versioned backend lowering. Today's `crystal` emitter is classified **speculative** (`crystal-pulse-placement-v1`): the open research question that gates honest lowering is **what is a coupling?** — a circuit wire is discrete; a coupling between resonant structures is a continuous overlap. Until kannaka-crystal's pairwise coupling experiments give that empirical footing (see its ADR-0004 evidence model), the emitter stays an approximation and the syntax stays small.
+v0.2 — experimental, evolving separately from kannaka-crystal on purpose. The trajectory is set by [ADR-0002 (Holographic Development Language)](docs/adr/0002-holographic-development-language.md); **Phase 1 (identity + IR) has landed**: plans are versioned (`schema_version`, `compiler_version`), deterministically hashed (`program_hash` / `plan_hash`), carry provider/domain fields plus registry snapshots and a resolution report, and every emitter declares its lowering model. Still ahead: typed component queries over multiple providers (Crystal / Memory / Swarm / Hybrid), typed couplings replacing geometric bridges, Memory as a first-class backend, and the swarm feedback loop. Today's `crystal` emitter is classified **speculative** (`crystal-pulse-placement-v1`): the open research question that gates honest lowering is **what is a coupling?** — a circuit wire is discrete; a coupling between resonant structures is a continuous overlap. Until kannaka-crystal's pairwise coupling experiments give that empirical footing (see its ADR-0004 evidence model), the emitter stays an approximation and the syntax stays small.
 
 ## Development
 

@@ -31,9 +31,30 @@ pub enum GrowError {
     Runaway,
 }
 
+/// The one component domain the compiler resolves today. ADR-0002 plans
+/// for `memory`, `swarm`, and `hybrid` domains; until queries carry a
+/// domain of their own (Phase 3) every leaf and bridge is Crystal's.
+pub const DOMAIN_CRYSTAL: &str = "crystal";
+
+/// Version of the Abstract Holographic Plan schema (ADR-0002 §7).
+pub const PLAN_SCHEMA_VERSION: &str = "1";
+
+/// How a plan treats unresolved components (ADR-0002 §10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UnresolvedMode {
+    /// Compilation fails when a required component cannot be resolved.
+    Strict,
+    /// The plan carries placeholders that must not execute until resolved.
+    Stub,
+    /// Backends may approximate unresolved components (proxy pulses).
+    Speculative,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Leaf {
     pub cell: String,
+    pub domain: &'static str,
     pub x: f64,
     pub y: f64,
     pub w: f64,
@@ -46,6 +67,7 @@ pub struct Leaf {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Bridge {
+    pub domain: &'static str,
     pub x1: f64,
     pub y1: f64,
     pub x2: f64,
@@ -55,12 +77,49 @@ pub struct Bridge {
     pub resolved: Option<crate::registry::Resolved>,
 }
 
+/// The Abstract Holographic Plan — KannakaHDL's stable intermediate
+/// representation (ADR-0002 §7). Versioned, hashed, and honest about
+/// what resolved and what did not.
 #[derive(Debug, Serialize)]
 pub struct Plan {
+    pub schema_version: &'static str,
+    pub compiler_version: &'static str,
+    /// Deterministic hash of the source program; filled by [`Plan::seal`].
+    pub program_hash: String,
+    /// Deterministic hash of this plan's content; filled by [`Plan::seal`].
+    pub plan_hash: String,
+    pub unresolved_mode: UnresolvedMode,
     pub grown_from: String,
     pub leaves: Vec<Leaf>,
     pub bridges: Vec<Bridge>,
+    /// Which registries resolution consulted (ADR-0002 §7).
+    pub registry_snapshots: Vec<crate::registry::RegistrySnapshot>,
+    pub resolution_report: Option<crate::registry::ResolutionReport>,
     pub warnings: Vec<String>,
+}
+
+/// Deterministic FNV-1a 64-bit over bytes — stable across platforms and
+/// runs, so identical sources and plans hash identically everywhere.
+pub fn fnv1a64(bytes: &[u8]) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("fnv1a64:{h:016x}")
+}
+
+impl Plan {
+    /// Stamp the deterministic program and plan hashes (ADR-0002 Phase 1).
+    /// Call after resolution, before emission — the plan hash covers
+    /// resolution results, so re-resolving against a changed registry
+    /// yields a different plan hash for the same program hash.
+    pub fn seal(&mut self, source: &str) {
+        self.program_hash = fnv1a64(source.as_bytes());
+        self.plan_hash = String::new();
+        let json = serde_json::to_string(self).expect("plan serializes");
+        self.plan_hash = fnv1a64(json.as_bytes());
+    }
 }
 
 fn eval(expr: &Expr, env: &HashMap<String, i64>, cell: &str) -> Result<i64, GrowError> {
@@ -155,6 +214,7 @@ impl<'a> Grower<'a> {
                 Action::Base(query) => {
                     self.leaves.push(Leaf {
                         cell: def.name.clone(),
+                        domain: DOMAIN_CRYSTAL,
                         x: region.x,
                         y: region.y,
                         w: region.w,
@@ -194,6 +254,7 @@ impl<'a> Grower<'a> {
                             let (x1, y1) = pair[0].center();
                             let (x2, y2) = pair[1].center();
                             self.bridges.push(Bridge {
+                                domain: DOMAIN_CRYSTAL,
                                 x1,
                                 y1,
                                 x2,
@@ -241,9 +302,16 @@ pub fn grow(program: &Program) -> Result<Plan, GrowError> {
         )?;
     }
     Ok(Plan {
+        schema_version: PLAN_SCHEMA_VERSION,
+        compiler_version: env!("CARGO_PKG_VERSION"),
+        program_hash: String::new(),
+        plan_hash: String::new(),
+        unresolved_mode: UnresolvedMode::Speculative,
         grown_from: names.join(", "),
         leaves: grower.leaves,
         bridges: grower.bridges,
+        registry_snapshots: Vec::new(),
+        resolution_report: None,
         warnings: Vec::new(),
     })
 }
@@ -286,6 +354,35 @@ mod tests {
         centers.sort();
         centers.dedup();
         assert_eq!(centers.len(), 8, "leaf regions must not overlap");
+    }
+
+    #[test]
+    fn plan_carries_schema_identity() {
+        let plan = grow(&parse(BANK).unwrap()).unwrap();
+        assert_eq!(plan.schema_version, "1");
+        assert_eq!(plan.compiler_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(plan.unresolved_mode, UnresolvedMode::Speculative);
+        assert!(plan.leaves.iter().all(|l| l.domain == DOMAIN_CRYSTAL));
+        assert!(plan.bridges.iter().all(|b| b.domain == DOMAIN_CRYSTAL));
+        assert!(plan.program_hash.is_empty(), "hashes are set by seal()");
+    }
+
+    #[test]
+    fn seal_hashes_are_deterministic_and_source_sensitive() {
+        let mut a = grow(&parse(BANK).unwrap()).unwrap();
+        let mut b = grow(&parse(BANK).unwrap()).unwrap();
+        a.seal(BANK);
+        b.seal(BANK);
+        assert_eq!(a.program_hash, b.program_hash);
+        assert_eq!(a.plan_hash, b.plan_hash);
+        assert!(a.program_hash.starts_with("fnv1a64:"));
+        assert_ne!(a.program_hash, a.plan_hash);
+
+        let other = BANK.replace("MemoryBank(8)", "MemoryBank(4)");
+        let mut c = grow(&parse(&other).unwrap()).unwrap();
+        c.seal(&other);
+        assert_ne!(a.program_hash, c.program_hash);
+        assert_ne!(a.plan_hash, c.plan_hash);
     }
 
     #[test]

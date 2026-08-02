@@ -1,8 +1,8 @@
 [package]
 name = "kannaka-hdl"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "KannakaHDL — a growth language for informational materials: architectures grown from discovered Crystal Primitives by recursive rewrite rules"
+description = "KannakaHDL — the Holographic Development Language: architectures grown from discovered components by recursive rewrite rules"
 license = "MIT"
 repository = "https://github.com/flaukowski/kannaka-hdl"
 

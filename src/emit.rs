@@ -5,12 +5,21 @@
 //!   the architecture with placed pulses (until kannaka-crystal grows a
 //!   first-class PLACE op; see ADR-0001 "ports" caveat)
 //! - `html`    — a standalone growth visualization (no dependencies)
+//!
+//! Every emitter declares its lowering model (ADR-0002 §11) so a
+//! consumer can tell a faithful serialization from an approximation.
 
-use crate::grow::Plan;
+use crate::grow::{Plan, UnresolvedMode};
 use std::collections::HashMap;
 
+pub const LOWERING_JSON: &str = "plan-json-v1";
+pub const LOWERING_CRYSTAL: &str = "crystal-pulse-placement-v1";
+pub const LOWERING_HTML: &str = "html-growth-viz-v1";
+
 pub fn emit_json(plan: &Plan) -> String {
-    serde_json::to_string_pretty(plan).expect("plan serializes")
+    let mut v = serde_json::to_value(plan).expect("plan serializes");
+    v["lowering_model"] = serde_json::Value::String(LOWERING_JSON.into());
+    serde_json::to_string_pretty(&v).expect("value serializes")
 }
 
 /// Deterministic per-class carrier frequency so different primitive
@@ -24,29 +33,48 @@ fn class_frequency(class: &str) -> f64 {
 }
 
 pub fn emit_crystal(plan: &Plan) -> String {
-    // Field material: the most common among resolved leaves.
+    // Field material: the most common among resolved leaves. Flattening
+    // a heterogeneous plan to one material is a declared approximation
+    // (ADR-0002 §11) — never a silent one.
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for leaf in &plan.leaves {
         if let Some(r) = &leaf.resolved {
             *counts.entry(r.material.as_str()).or_default() += 1;
         }
     }
+    let distinct_materials = counts.len();
     let material = counts
         .into_iter()
         .max_by_key(|(_, n)| *n)
         .map(|(m, _)| m)
         .unwrap_or("ideal_resonator");
 
+    // Unresolved components only get proxy pulses in speculative mode;
+    // in stub mode they stay declared-but-inert (ADR-0002 §10).
+    let speculate = plan.unresolved_mode == UnresolvedMode::Speculative;
+
     let mut out = String::new();
     out.push_str(&format!(
-        "# grown by kannaka-hdl from: {}\n# {} leaves, {} bridges — pulse-placement approximation\n",
+        "# grown by kannaka-hdl from: {}\n# {} leaves, {} bridges — pulse-placement approximation\n# lowering model: {LOWERING_CRYSTAL}\n",
         plan.grown_from,
         plan.leaves.len(),
         plan.bridges.len()
     ));
+    if distinct_materials > 1 {
+        out.push_str(&format!(
+            "# WARNING: {distinct_materials} materials among resolved leaves; field flattened to majority \"{material}\" — abstract approximation, not a material-region map\n"
+        ));
+    }
     out.push_str(&format!("MATERIAL {material}\nSEED 21\n"));
 
     for leaf in &plan.leaves {
+        if leaf.resolved.is_none() && !speculate {
+            out.push_str(&format!(
+                "# STUB unresolved {} \"{}\" — no pulse emitted (re-resolve, or lower with --unresolved speculative)\n",
+                leaf.cell, leaf.query.class
+            ));
+            continue;
+        }
         let (cx, cy) = (leaf.x + leaf.w / 2.0, leaf.y + leaf.h / 2.0);
         let radius = (leaf.w.min(leaf.h) * 0.3).clamp(0.03, 0.15);
         let amplitude = 0.8 + leaf.resolved.as_ref().map(|r| r.persistence).unwrap_or(0.2);
@@ -57,10 +85,17 @@ pub fn emit_crystal(plan: &Plan) -> String {
             leaf.resolved
                 .as_ref()
                 .map(|r| r.id.as_str())
-                .unwrap_or("(unresolved)")
+                .unwrap_or("(unresolved proxy)")
         ));
     }
     for bridge in &plan.bridges {
+        if bridge.resolved.is_none() && !speculate {
+            out.push_str(&format!(
+                "# STUB unresolved bridge \"{}\" — no pulse emitted\n",
+                bridge.class
+            ));
+            continue;
+        }
         let (mx, my) = ((bridge.x1 + bridge.x2) / 2.0, (bridge.y1 + bridge.y2) / 2.0);
         let freq = class_frequency(&bridge.class);
         out.push_str(&format!(
@@ -124,7 +159,8 @@ function draw(){
 }
 document.getElementById('info').textContent =
   `${plan.grown_from} — ${plan.leaves.length} leaves, ${plan.bridges.length} bridges` +
-  (plan.warnings.length ? ` — ${plan.warnings.length} unresolved (grey)` : '');
+  (plan.warnings.length ? ` — ${plan.warnings.length} unresolved (grey)` : '') +
+  ' — lowering model: html-growth-viz-v1';
 draw();
 </script>
 </body>
@@ -148,16 +184,20 @@ mod tests {
     }
 
     #[test]
-    fn json_round_trips_counts() {
+    fn json_round_trips_counts_and_declares_lowering_model() {
         let p = plan();
         let v: serde_json::Value = serde_json::from_str(&emit_json(&p)).unwrap();
         assert_eq!(v["leaves"].as_array().unwrap().len(), 4);
         assert_eq!(v["bridges"].as_array().unwrap().len(), 3);
+        assert_eq!(v["lowering_model"], LOWERING_JSON);
+        assert_eq!(v["schema_version"], "1");
+        assert_eq!(v["unresolved_mode"], "speculative");
     }
 
     #[test]
     fn crystal_program_is_runnable_shape() {
         let text = emit_crystal(&plan());
+        assert!(text.contains(&format!("# lowering model: {LOWERING_CRYSTAL}")));
         assert!(text.contains("MATERIAL "));
         assert_eq!(text.matches("PULSE").count(), 7, "4 leaves + 3 bridges");
         assert!(text.contains("STABILIZE"));
@@ -168,6 +208,40 @@ mod tests {
             let y: f64 = parts[2].parse().unwrap();
             assert!((0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y));
         }
+    }
+
+    #[test]
+    fn stub_mode_withholds_unresolved_proxy_pulses() {
+        // The fixture plan is fully unresolved: speculative mode (the
+        // default) approximates everything; stub mode must not.
+        let mut p = plan();
+        p.unresolved_mode = UnresolvedMode::Stub;
+        let text = emit_crystal(&p);
+        assert_eq!(text.matches("PULSE").count(), 0);
+        assert_eq!(text.matches("# STUB unresolved").count(), 7);
+        assert!(text.contains("STABILIZE"), "program shape is preserved");
+    }
+
+    #[test]
+    fn heterogeneous_materials_flatten_loudly_not_silently() {
+        use crate::registry::{Resolved, PROVIDER_CRYSTAL};
+        let mut p = plan();
+        for (i, leaf) in p.leaves.iter_mut().enumerate() {
+            leaf.resolved = Some(Resolved {
+                provider: PROVIDER_CRYSTAL,
+                id: format!("CRY-{i:06}"),
+                class: "MemorySeed".into(),
+                persistence: 0.6,
+                noise_tolerance: 0.8,
+                material: if i == 0 { "silicon" } else { "metamaterial" }.into(),
+            });
+        }
+        let text = emit_crystal(&p);
+        assert!(text.contains("MATERIAL metamaterial"), "majority wins");
+        assert!(
+            text.contains("# WARNING: 2 materials"),
+            "flattening must be declared"
+        );
     }
 
     #[test]

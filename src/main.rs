@@ -1,15 +1,15 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use kannaka_hdl::emit;
-use kannaka_hdl::grow::grow;
+use kannaka_hdl::grow::{fnv1a64, grow, UnresolvedMode};
 use kannaka_hdl::parser::parse;
-use kannaka_hdl::registry::{default_path, resolve_plan, Registry};
+use kannaka_hdl::registry::{default_path, resolve_plan, unresolved_count, Registry};
 use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
     name = "kannaka-hdl",
     version,
-    about = "KannakaHDL — grow architectures from discovered Crystal Primitives"
+    about = "KannakaHDL — the Holographic Development Language: grow architectures from discovered components (ADR-0002)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -21,6 +21,25 @@ enum EmitKind {
     Json,
     Crystal,
     Html,
+}
+
+/// Unresolved-component policy (ADR-0002 §10). `speculative` matches the
+/// historical behavior (proxy pulses); scientific runs want `strict`.
+#[derive(Clone, Copy, ValueEnum)]
+enum UnresolvedCli {
+    Strict,
+    Stub,
+    Speculative,
+}
+
+impl From<UnresolvedCli> for UnresolvedMode {
+    fn from(mode: UnresolvedCli) -> Self {
+        match mode {
+            UnresolvedCli::Strict => UnresolvedMode::Strict,
+            UnresolvedCli::Stub => UnresolvedMode::Stub,
+            UnresolvedCli::Speculative => UnresolvedMode::Speculative,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -40,6 +59,10 @@ enum Command {
         /// Skip registry resolution entirely
         #[arg(long)]
         no_resolve: bool,
+        /// Unresolved-component policy: strict fails, stub withholds
+        /// execution, speculative approximates (ADR-0002 §10)
+        #[arg(long, value_enum, default_value = "speculative")]
+        unresolved: UnresolvedCli,
         #[arg(long, value_enum, default_value = "json")]
         emit: EmitKind,
         /// Output file (default: stdout)
@@ -63,12 +86,13 @@ fn dispatch(command: Command) -> Result<(), String> {
             let program = parse(&source).map_err(|e| e.to_string())?;
             let plan = grow(&program).map_err(|e| e.to_string())?;
             println!(
-                "ok: {} cell(s), grown {} -> {} leaves, {} bridges, max depth {}",
+                "ok: {} cell(s), grown {} -> {} leaves, {} bridges, max depth {}, program {}",
                 program.cells.len(),
                 plan.grown_from,
                 plan.leaves.len(),
                 plan.bridges.len(),
-                plan.leaves.iter().map(|l| l.depth).max().unwrap_or(0)
+                plan.leaves.iter().map(|l| l.depth).max().unwrap_or(0),
+                fnv1a64(source.as_bytes())
             );
             Ok(())
         }
@@ -76,6 +100,7 @@ fn dispatch(command: Command) -> Result<(), String> {
             file,
             registry,
             no_resolve,
+            unresolved,
             emit,
             out,
         } => {
@@ -83,8 +108,17 @@ fn dispatch(command: Command) -> Result<(), String> {
                 std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
             let program = parse(&source).map_err(|e| e.to_string())?;
             let mut plan = grow(&program).map_err(|e| e.to_string())?;
+            plan.unresolved_mode = unresolved.into();
+            let strict = plan.unresolved_mode == UnresolvedMode::Strict;
 
-            if !no_resolve {
+            if no_resolve {
+                if strict {
+                    return Err(
+                        "--unresolved strict requires registry resolution (drop --no-resolve)"
+                            .into(),
+                    );
+                }
+            } else {
                 let path = registry.unwrap_or_else(default_path);
                 match Registry::load(&path) {
                     Ok(reg) => {
@@ -98,6 +132,15 @@ fn dispatch(command: Command) -> Result<(), String> {
                         for w in &plan.warnings {
                             eprintln!("  warning: {w}");
                         }
+                        let missing = unresolved_count(&plan);
+                        if strict && missing > 0 {
+                            return Err(format!(
+                                "strict mode: {missing} component(s) unresolved — the swarm has not grown them yet (see warnings above)"
+                            ));
+                        }
+                    }
+                    Err(e) if strict => {
+                        return Err(format!("strict mode: registry unavailable: {e}"));
                     }
                     Err(e) => {
                         plan.warnings.push(format!("registry unavailable: {e}"));
@@ -106,6 +149,7 @@ fn dispatch(command: Command) -> Result<(), String> {
                 }
             }
 
+            plan.seal(&source);
             let output = match emit {
                 EmitKind::Json => emit::emit_json(&plan),
                 EmitKind::Crystal => emit::emit_crystal(&plan),
