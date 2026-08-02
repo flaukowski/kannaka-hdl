@@ -9,7 +9,9 @@
         A R C H I T E C T U R E S   A R E   G R O W N
 ```
 
-**KannakaHDL** is a growth language for informational materials. You don't draw an architecture — you write rewrite rules, and the architecture *grows*: cells recursively split space until they bottom out in base cases, and **every base case is a registry query** against [kannaka-crystal](https://github.com/flaukowski/kannaka-crystal)'s catalog of discovered primitives. Nothing is hand-drawn; grown structures are composed from what the swarm actually found.
+**KannakaHDL — the Holographic Development Language** (ADR-0002). A backend-independent language for growing, resolving, composing, testing, and deploying holographic and resonant information architectures across the Kannaka ecosystem. You don't draw an architecture — you write rewrite rules, and the architecture *grows*: cells recursively split until they bottom out in base cases, and **every base case is a component query** — today against [kannaka-crystal](https://github.com/flaukowski/kannaka-crystal)'s catalog of discovered primitives, with Kannaka Memory HRM structures and NATS swarm capabilities as the next provider domains. Nothing is hand-drawn; grown structures are composed from what the swarm actually found.
+
+*"HDL" here does not mean Hardware Description Language — wires, discrete ports, and defined logic levels are the wrong metaphors for resonant media. Couplings may be regions, fields, relationships, protocols, or transformations.*
 
 [![CI](https://github.com/flaukowski/kannaka-hdl/actions/workflows/ci.yml/badge.svg)](https://github.com/flaukowski/kannaka-hdl/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Space%20Child-blueviolet)]() [![Rust](https://img.shields.io/badge/rust-2021-orange)]()
 
@@ -68,7 +70,7 @@ First lab result worth knowing: **resolution also chooses the field material** (
 
 ## Status
 
-v0.1 — experimental, evolving separately from kannaka-crystal on purpose. The open research question that gates v1: **what is a port?** A circuit wire is discrete; a coupling between resonant structures is a continuous overlap. Until that has empirical footing (experiments live in kannaka-crystal), the `crystal` emitter stays an approximation and the syntax stays small.
+v0.1 — experimental, evolving separately from kannaka-crystal on purpose. The trajectory is set by [ADR-0002 (Holographic Development Language)](docs/adr/0002-holographic-development-language.md): typed component queries over multiple providers (Crystal / Memory / Swarm / Hybrid), typed couplings replacing geometric bridges, a domain-neutral Abstract Holographic Plan IR, strict/stub/speculative resolution modes, and versioned backend lowering. Today's `crystal` emitter is classified **speculative** (`crystal-pulse-placement-v1`): the open research question that gates honest lowering is **what is a coupling?** — a circuit wire is discrete; a coupling between resonant structures is a continuous overlap. Until kannaka-crystal's pairwise coupling experiments give that empirical footing (see its ADR-0004 evidence model), the emitter stays an approximation and the syntax stays small.
 
 ## Development
 
