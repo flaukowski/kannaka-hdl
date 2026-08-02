@@ -20,3 +20,4 @@ pub mod emit;
 pub mod grow;
 pub mod parser;
 pub mod registry;
+pub mod transform;

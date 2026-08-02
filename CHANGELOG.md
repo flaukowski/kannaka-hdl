@@ -2,6 +2,31 @@
 
 All notable changes to kannaka-hdl are documented here.
 
+## v0.7.0 — 2026-08-02
+
+ADR-0002 Phase 5: cross-domain transforms (acceptance #9), built on
+the 256-dim primitive signature contract that landed with
+kannaka-crystal ADR-0004.
+
+### Added
+- **`crystal-signature-to-hrm-glyph-v1`** (forward): a resolved
+  Crystal component's signature becomes an HRM glyph — L2-normalized
+  resonance vector, dominant-mode glyph text executable via
+  `kannaka remember`, and a declared `information_loss` list
+  (material, numeric fidelity, spatial extent, lineage). Components
+  without a usable signature are never invented (`None`).
+- **`hrm-glyph-to-crystal-encoding-v1`** (reverse): a glyph's
+  resonance maps back onto the 16×16 signature grid as PULSE lines,
+  sign carried as phase — a speculative pulse-placement encoding with
+  its own declared loss (glyph text, tier/salience, non-dominant
+  modes). Both directions are versioned, deterministic, and tested.
+- **Memory backend integration**: resolved crystal leaves with
+  signatures now cross into the memory plan under `transformed`
+  (naming the transform and its loss) with `kannaka remember`
+  commands, instead of being skipped.
+- `Resolved` carries the primitive `signature` (elided from plan JSON
+  when empty; old registry rows default to empty).
+
 ## v0.6.0 — 2026-08-02
 
 ADR-0002 Phases 6 (publish) and 7 (assertions) first slices, plus a

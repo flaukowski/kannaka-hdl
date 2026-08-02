@@ -195,12 +195,39 @@ pub fn emit_memory(plan: &Plan) -> String {
         }
     }
 
-    let skipped: Vec<Value> = plan
-        .leaves
-        .iter()
-        .filter(|l| l.domain != DOMAIN_MEMORY)
-        .map(|l| json!({ "cell": l.cell, "domain": l.domain, "class": l.query.class }))
-        .collect();
+    // Resolved crystal components with signatures cross into the HRM
+    // through the versioned forward transform (ADR-0002 §13); everything
+    // else non-memory is skipped, never silently dropped.
+    let mut transformed = Vec::new();
+    let mut skipped = Vec::new();
+    for leaf in plan.leaves.iter().filter(|l| l.domain != DOMAIN_MEMORY) {
+        let glyph = leaf
+            .resolved
+            .as_ref()
+            .and_then(crate::transform::crystal_signature_to_glyph);
+        match glyph {
+            Some(glyph) => {
+                commands.push(format!(
+                    "kannaka remember \"{}\" --importance {:.2}",
+                    glyph.text,
+                    leaf.resolved.as_ref().map(|r| r.persistence).unwrap_or(0.5)
+                ));
+                transformed.push(json!({
+                    "cell": leaf.cell,
+                    "source": glyph.source_id,
+                    "class": glyph.class,
+                    "via_transform": glyph.transform,
+                    "resonance_dims": glyph.resonance.len(),
+                    "information_loss": glyph.information_loss,
+                }));
+            }
+            None => skipped.push(json!({
+                "cell": leaf.cell,
+                "domain": leaf.domain,
+                "class": leaf.query.class,
+            })),
+        }
+    }
 
     let doc = json!({
         "lowering_model": LOWERING_MEMORY,
@@ -211,6 +238,7 @@ pub fn emit_memory(plan: &Plan) -> String {
         "unresolved_mode": plan.unresolved_mode,
         "nodes": nodes,
         "relationships": relationships,
+        "transformed": transformed,
         "commands": commands,
         "stubbed_nodes": stubbed,
         "skipped": skipped,
@@ -345,6 +373,7 @@ mod tests {
                 persistence: 0.6,
                 noise_tolerance: 0.8,
                 material: if i == 0 { "silicon" } else { "metamaterial" }.into(),
+                signature: Vec::new(),
             });
         }
         let text = emit_crystal(&p);
@@ -386,6 +415,40 @@ mod tests {
             2,
             "speculative default lowers unresolved nodes"
         );
+
+        // A resolved crystal leaf with a signature crosses via the
+        // versioned forward transform instead of being skipped.
+        let mut hybrid = grow(&parse(src).unwrap()).unwrap();
+        let mut sig = vec![0.0; 256];
+        sig[7] = 1.0;
+        for leaf in hybrid.leaves.iter_mut().filter(|l| l.domain == "crystal") {
+            leaf.resolved = Some(crate::registry::Resolved {
+                provider: crate::registry::PROVIDER_CRYSTAL,
+                id: "CRY-000777".into(),
+                class: "MemorySeed".into(),
+                persistence: 0.9,
+                noise_tolerance: 0.9,
+                material: "metamaterial".into(),
+                signature: sig.clone(),
+            });
+        }
+        let v: serde_json::Value = serde_json::from_str(&emit_memory(&hybrid)).unwrap();
+        assert_eq!(v["skipped"].as_array().unwrap().len(), 0);
+        let transformed = v["transformed"].as_array().unwrap();
+        assert_eq!(transformed.len(), 1);
+        assert_eq!(
+            transformed[0]["via_transform"],
+            crate::transform::SIGNATURE_TO_GLYPH
+        );
+        assert!(!transformed[0]["information_loss"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(v["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c.as_str().unwrap().contains("CRY-000777")));
         assert!(commands[0]
             .as_str()
             .unwrap()

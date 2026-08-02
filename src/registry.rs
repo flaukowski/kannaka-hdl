@@ -20,6 +20,10 @@ struct RawPrimitive {
     persistence: f64,
     noise_tolerance: f64,
     material_id: String,
+    /// Normalized 256-dim primitive signature (crystal ADR-0004);
+    /// absent in very old rows.
+    #[serde(default)]
+    signature: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -74,6 +78,11 @@ pub struct Resolved {
     pub persistence: f64,
     pub noise_tolerance: f64,
     pub material: String,
+    /// Crystal primitive signature when the provider has one — the
+    /// input to cross-domain transforms (ADR-0002 §13). Elided from
+    /// plan JSON when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signature: Vec<f64>,
 }
 
 /// A record of which registry resolution consulted (ADR-0002 §7) — the
@@ -197,6 +206,7 @@ impl Registry {
                 persistence: p.persistence,
                 noise_tolerance: p.noise_tolerance,
                 material: p.material_id.clone(),
+                signature: p.signature.clone(),
             })
     }
 }
@@ -238,6 +248,7 @@ impl Provider for Registry {
                 persistence: p.persistence,
                 noise_tolerance: p.noise_tolerance,
                 material: p.material_id.clone(),
+                signature: p.signature.clone(),
             })
             .collect()
     }
@@ -529,6 +540,7 @@ fn parse_recall_envelope(stdout: &str, query: &Query) -> Vec<Resolved> {
                     persistence: strength,
                     noise_tolerance: similarity,
                     material: "hrm".into(),
+                    signature: Vec::new(),
                 }
             })
         })
@@ -695,6 +707,7 @@ mod tests {
                 persistence: 0.9,
                 noise_tolerance: 0.9,
                 material: "ideal_resonator".into(),
+                signature: Vec::new(),
             },
             Resolved {
                 provider: PROVIDER_FIXTURE,
@@ -703,6 +716,7 @@ mod tests {
                 persistence: 0.5,
                 noise_tolerance: 0.5,
                 material: "ideal_resonator".into(),
+                signature: Vec::new(),
             },
         ]);
 
@@ -749,6 +763,7 @@ mod tests {
             persistence,
             noise_tolerance,
             material: "ideal_resonator".into(),
+            signature: Vec::new(),
         }
     }
 
@@ -873,6 +888,7 @@ mod tests {
                 persistence: 0.8,
                 noise_tolerance: 0.7,
                 material: "hrm".into(),
+                signature: Vec::new(),
             }],
         );
         let src = r#"
