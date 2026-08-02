@@ -95,6 +95,44 @@ pub struct ResolutionReport {
     pub bridges_resolved: usize,
 }
 
+/// A structured research request for a capability the swarm has not
+/// grown yet (ADR-0002 §14): a missing component is a discovery task,
+/// not a dead end. Publishable over NATS as-is; `requested_by_plan` is
+/// stamped with the plan hash by [`crate::grow::Plan::seal`].
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscoveryRequest {
+    pub request_type: &'static str,
+    pub domain: String,
+    pub component_type: Option<String>,
+    pub class: String,
+    pub constraints: DiscoveryConstraints,
+    pub requested_by_plan: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscoveryConstraints {
+    pub min_persistence: f64,
+    pub min_noise_tolerance: f64,
+    pub material: Option<String>,
+}
+
+impl DiscoveryRequest {
+    fn for_query(query: &Query) -> Self {
+        DiscoveryRequest {
+            request_type: "capability_discovery",
+            domain: query.domain.clone(),
+            component_type: query.component_type.clone(),
+            class: query.class.clone(),
+            constraints: DiscoveryConstraints {
+                min_persistence: query.min_persistence,
+                min_noise_tolerance: query.min_noise_tolerance,
+                material: query.material.clone(),
+            },
+            requested_by_plan: String::new(),
+        }
+    }
+}
+
 pub struct Registry {
     primitives: Vec<RawPrimitive>,
     pub source: PathBuf,
@@ -278,12 +316,13 @@ struct StrategyState {
 
 /// Resolve one query against the provider answering its domain.
 /// Returns the pick, or `None` plus the reason it could not be
-/// satisfied.
+/// satisfied — and, when the capability itself is missing (rather than
+/// contended), a structured discovery request for the swarm (§14).
 fn resolve_component(
     providers: &[&dyn Provider],
     query: &Query,
     state: &mut StrategyState,
-) -> (Option<Resolved>, Option<String>) {
+) -> (Option<Resolved>, Option<String>, Option<DiscoveryRequest>) {
     use crate::parser::Strategy;
 
     let Some(provider) = providers.iter().find(|p| p.domain() == query.domain) else {
@@ -293,6 +332,7 @@ fn resolve_component(
                 "no provider for domain \"{}\" — Memory and Swarm providers arrive with later ADR-0002 phases",
                 query.domain
             )),
+            Some(DiscoveryRequest::for_query(query)),
         );
     };
     if let Some(t) = &query.component_type {
@@ -304,6 +344,7 @@ fn resolve_component(
                     provider.id(),
                     t
                 )),
+                None,
             );
         }
     }
@@ -326,14 +367,16 @@ fn resolve_component(
                 "no component (class \"{}\", min_persistence {}{noise}{material}) — swarm has not grown one yet",
                 query.class, query.min_persistence
             )),
+            Some(DiscoveryRequest::for_query(query)),
         );
     }
     match query.strategy {
-        Strategy::Best => (Some(candidates.swap_remove(0)), None),
+        Strategy::Best => (Some(candidates.swap_remove(0)), None, None),
         Strategy::Robust => (
             candidates
                 .into_iter()
                 .max_by(|a, b| a.noise_tolerance.total_cmp(&b.noise_tolerance)),
+            None,
             None,
         ),
         Strategy::Unique => match candidates
@@ -342,14 +385,17 @@ fn resolve_component(
         {
             Some(c) => {
                 state.claimed.insert(c.id.clone());
-                (Some(c), None)
+                (Some(c), None, None)
             }
+            // The capability exists — it is contended, not missing — so
+            // no discovery request is generated.
             None => (
                 None,
                 Some(format!(
                     "unique strategy exhausted for class \"{}\" — every matching component is already claimed",
                     query.class
                 )),
+                None,
             ),
         },
         Strategy::Diverse => {
@@ -357,7 +403,7 @@ fn resolve_component(
             let cursor = state.cursors.entry(key).or_insert(0);
             let pick = candidates[*cursor % candidates.len()].clone();
             *cursor += 1;
-            (Some(pick), None)
+            (Some(pick), None, None)
         }
     }
 }
@@ -370,21 +416,33 @@ fn resolve_component(
 /// turns those warnings into failure at the CLI layer.
 pub fn resolve_plan(plan: &mut Plan, providers: &[&dyn Provider]) {
     let mut state = StrategyState::default();
+    let mut requested = std::collections::HashSet::new();
+    let mut request_if_new = |requests: &mut Vec<DiscoveryRequest>,
+                              request: Option<DiscoveryRequest>| {
+        if let Some(request) = request {
+            let key = serde_json::to_string(&request).expect("request serializes");
+            if requested.insert(key) {
+                requests.push(request);
+            }
+        }
+    };
 
     for leaf in &mut plan.leaves {
-        let (resolved, reason) = resolve_component(providers, &leaf.query, &mut state);
+        let (resolved, reason, request) = resolve_component(providers, &leaf.query, &mut state);
         leaf.resolved = resolved;
         if let Some(reason) = reason {
             plan.warnings.push(format!("{}: {reason}", leaf.cell));
         }
+        request_if_new(&mut plan.discovery_requests, request);
     }
     for bridge in &mut plan.bridges {
-        let (resolved, reason) = resolve_component(providers, &bridge.query, &mut state);
+        let (resolved, reason, request) = resolve_component(providers, &bridge.query, &mut state);
         bridge.resolved = resolved;
         if let Some(reason) = reason {
             plan.warnings
                 .push(format!("coupling \"{}\": {reason}", bridge.query.class));
         }
+        request_if_new(&mut plan.discovery_requests, request);
     }
     plan.warnings.dedup();
 
@@ -506,8 +564,41 @@ mod tests {
         let mut q = query("Memory Seed", 0.0);
         q.strategy = crate::parser::Strategy::Robust;
         let mut state = StrategyState::default();
-        let (picked, _) = resolve_component(&[&fixture], &q, &mut state);
+        let (picked, _, _) = resolve_component(&[&fixture], &q, &mut state);
         assert_eq!(picked.unwrap().id, "FIX-B");
+    }
+
+    #[test]
+    fn unresolved_components_generate_deduped_discovery_requests() {
+        let fixture = FixtureProvider::new(vec![]);
+        let src = r#"
+            cell Bank(n) {
+                when n > 1  => split Bank(n / 2), Bank(n / 2)
+                when always => base "Phase Knot" min_noise_tolerance 0.6
+            }
+            cell M() { when always => base memory.glyph "Identity Glyph" }
+            grow Bank(4)
+            grow M()
+        "#;
+        let mut plan = grow(&parse(src).unwrap()).unwrap();
+        resolve_plan(&mut plan, &[&fixture]);
+
+        assert_eq!(
+            plan.discovery_requests.len(),
+            2,
+            "four identical leaf misses dedupe to one request, plus the memory glyph"
+        );
+        let knot = &plan.discovery_requests[0];
+        assert_eq!(knot.request_type, "capability_discovery");
+        assert_eq!(knot.domain, "crystal");
+        assert_eq!(knot.class, "Phase Knot");
+        assert_eq!(knot.constraints.min_noise_tolerance, 0.6);
+        assert_eq!(plan.discovery_requests[1].domain, "memory");
+        assert!(knot.requested_by_plan.is_empty(), "stamped by seal()");
+
+        plan.seal(src);
+        assert_eq!(plan.discovery_requests[0].requested_by_plan, plan.plan_hash);
+        assert!(!plan.plan_hash.is_empty());
     }
 
     #[test]

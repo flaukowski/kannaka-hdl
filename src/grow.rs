@@ -109,6 +109,9 @@ pub struct Plan {
     /// Which registries resolution consulted (ADR-0002 §7).
     pub registry_snapshots: Vec<crate::registry::RegistrySnapshot>,
     pub resolution_report: Option<crate::registry::ResolutionReport>,
+    /// Structured research requests for capabilities the swarm has not
+    /// grown yet (ADR-0002 §14) — one per distinct unsatisfied query.
+    pub discovery_requests: Vec<crate::registry::DiscoveryRequest>,
     pub warnings: Vec<String>,
 }
 
@@ -127,12 +130,20 @@ impl Plan {
     /// Stamp the deterministic program and plan hashes (ADR-0002 Phase 1).
     /// Call after resolution, before emission — the plan hash covers
     /// resolution results, so re-resolving against a changed registry
-    /// yields a different plan hash for the same program hash.
+    /// yields a different plan hash for the same program hash. Also
+    /// stamps `requested_by_plan` on discovery requests (derived data,
+    /// blanked while hashing so sealing stays deterministic).
     pub fn seal(&mut self, source: &str) {
         self.program_hash = fnv1a64(source.as_bytes());
         self.plan_hash = String::new();
+        for request in &mut self.discovery_requests {
+            request.requested_by_plan = String::new();
+        }
         let json = serde_json::to_string(self).expect("plan serializes");
         self.plan_hash = fnv1a64(json.as_bytes());
+        for request in &mut self.discovery_requests {
+            request.requested_by_plan = self.plan_hash.clone();
+        }
     }
 }
 
@@ -327,6 +338,7 @@ pub fn grow(program: &Program) -> Result<Plan, GrowError> {
         bridges: grower.bridges,
         registry_snapshots: Vec::new(),
         resolution_report: None,
+        discovery_requests: Vec::new(),
         warnings: Vec::new(),
     })
 }

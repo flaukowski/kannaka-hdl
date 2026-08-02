@@ -152,6 +152,12 @@ fn dispatch(command: Command) -> Result<(), String> {
             }
 
             plan.seal(&source);
+            if !plan.discovery_requests.is_empty() {
+                eprintln!(
+                    "{} capability discovery request(s) in plan — publishable to the swarm (ADR-0002 §14)",
+                    plan.discovery_requests.len()
+                );
+            }
             let output = match emit {
                 EmitKind::Json => emit::emit_json(&plan),
                 EmitKind::Crystal => emit::emit_crystal(&plan),

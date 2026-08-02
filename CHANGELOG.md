@@ -2,6 +2,23 @@
 
 All notable changes to kannaka-hdl are documented here.
 
+## v0.5.0 — 2026-08-02
+
+ADR-0002 §14, first slice of the swarm feedback loop (acceptance #10).
+
+### Added
+- **Structured discovery requests**: every unsatisfied query whose
+  capability is genuinely missing (no provider for the domain, or no
+  matching component) generates a `capability_discovery` request in the
+  plan — `request_type`, `domain`, `component_type`, `class`,
+  `constraints` (persistence/noise/material floors), and
+  `requested_by_plan` stamped with the plan hash at seal time.
+  Requests dedupe across identical queries; a `unique`-strategy
+  exhaustion does not generate one (the capability exists — it is
+  contended, not missing). The CLI reports the request count on
+  stderr. Publishing over NATS and re-resolving on announcements is
+  the remaining §14 work.
+
 ## v0.4.0 — 2026-08-02
 
 ADR-0002 Phase 4: Kannaka Memory becomes a target.
