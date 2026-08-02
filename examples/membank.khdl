@@ -1,0 +1,13 @@
+# membank.khdl — the canonical KannakaHDL example: an 8-seed memory bank
+# grown from discovered primitives, bridged pairwise at every level.
+#
+#   kannaka-hdl grow examples/membank.khdl --emit html -o bank.html
+#   kannaka-hdl grow examples/membank.khdl --emit crystal -o bank.crystal
+#   kannaka-crystal run bank.crystal
+
+cell MemoryBank(n) {
+    when n > 1  => split MemoryBank(n / 2), MemoryBank(n / 2) bridge "Harmonic Bridge"
+    when always => base "Memory Seed" min_persistence 0.3
+}
+
+grow MemoryBank(8)

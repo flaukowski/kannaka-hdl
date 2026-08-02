@@ -1,0 +1,22 @@
+[package]
+name = "kannaka-hdl"
+version = "0.1.0"
+edition = "2021"
+description = "KannakaHDL — a growth language for informational materials: architectures grown from discovered Crystal Primitives by recursive rewrite rules"
+license = "MIT"
+repository = "https://github.com/flaukowski/kannaka-hdl"
+
+[[bin]]
+name = "kannaka-hdl"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.0", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+dirs = "5"
+
+[profile.release]
+lto = true
+strip = true

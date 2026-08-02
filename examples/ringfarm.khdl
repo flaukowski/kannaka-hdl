@@ -1,0 +1,21 @@
+# ringfarm.khdl — heterogeneous growth: a 3x court of echo rings around
+# an attractor core, standing echoes at the rim.
+
+cell Farm(n) {
+    when n > 2  => split Farm(n - 1), Court() bridge "Standing Echo"
+    when always => base "Attractor Field" min_persistence 0.3
+}
+
+cell Court() {
+    when always => split Ring(), Core(), Ring() bridge "Harmonic Bridge"
+}
+
+cell Ring() {
+    when always => base "Echo Ring"
+}
+
+cell Core() {
+    when always => base "Attractor Field" min_persistence 0.4
+}
+
+grow Farm(4)
