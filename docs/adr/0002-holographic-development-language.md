@@ -1,6 +1,6 @@
 # ADR-0002: Reframe KannakaHDL as the Holographic Development Language
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-08-02)
 - **Date:** 2026-08-02
 - **Decision Owners:** KannakaHDL, Kannaka Crystal, and Kannaka Memory maintainers
 - **Applies To:** KannakaHDL parser, grower, resolver, emitters, primitive registries, HRM composition, NATS swarm coordination
