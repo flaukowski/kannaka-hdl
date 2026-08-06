@@ -29,7 +29,7 @@ cell SwarmAnchor() {
 }
 
 cell CrystalAnchor() {
-    when always => base memory.memory "crystal evidence ladder replication perturbation" min_noise_tolerance 0.25
+    when always => base memory.memory "crystal evidence ladder CRY-012705 Level 3 perturbation survival" min_noise_tolerance 0.25
 }
 
 cell RadioAnchor() {

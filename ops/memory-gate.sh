@@ -19,6 +19,16 @@
 
 set -u
 
+# Pin recall semantics: experimental ranking knobs left exported in a
+# shell (temporal/energy exponents, glyph gravity) change what the live
+# memory returns — measured 2026-08-06: KANNAKA_RECALL_TEMPORAL_EXP=1.0
+# buried a fresh anchor that clean-env recall ranks first. A gate that
+# inherits experiment flags is a gate whose verdict depends on who ran
+# it last; the gate always judges default recall.
+unset KANNAKA_RECALL_TEMPORAL_EXP KANNAKA_RECALL_ENERGY_EXP \
+      KANNAKA_RECALL_TEMPORAL_HALFLIFE_DAYS KANNAKA_RECALL_TEMPORAL_FLOOR \
+      KANNAKA_GLYPH_GRAVITY 2>/dev/null || true
+
 HDL="${KANNAKA_HDL_BIN:-kannaka-hdl}"
 KAN="${KANNAKA_BIN:-kannaka}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
