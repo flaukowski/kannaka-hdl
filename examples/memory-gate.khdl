@@ -1,0 +1,44 @@
+# Memory integrity gate — a pre-flight check for the LIVE Kannaka HRM.
+#
+# Each leaf is a recall query for an operational anchor the memory must
+# not lose. Run with --memory-provider --unresolved strict: any anchor
+# the HRM cannot surface fails the build, and the expect gates put
+# floors under the worst survivor. Intended use: run before one-way
+# operations (.hrm format migrations, encoder swaps, facet backfills)
+# so "the memory still knows itself" is a checked precondition rather
+# than an assumption.
+
+cell IntegrityGate() {
+    when always => split IdentityAnchors(), WorkAnchors()
+}
+
+cell IdentityAnchors() {
+    when always => split HomeAnchor(), SwarmAnchor()
+}
+
+cell WorkAnchors() {
+    when always => split CrystalAnchor(), RadioAnchor()
+}
+
+cell HomeAnchor() {
+    when always => base memory.memory "Kannaka Labs location Tech Hub OpenBotCity" min_noise_tolerance 0.25
+}
+
+cell SwarmAnchor() {
+    when always => base memory.memory "swarm NATS authentication kannaka nodes" min_noise_tolerance 0.25
+}
+
+cell CrystalAnchor() {
+    when always => base memory.memory "crystal evidence ladder replication perturbation" min_noise_tolerance 0.25
+}
+
+cell RadioAnchor() {
+    when always => base memory.memory "Ghost Signals podcast episode radio" min_noise_tolerance 0.25
+}
+
+grow IntegrityGate()
+
+expect unresolved_components == 0
+expect capacity >= 4
+expect couplings == 0
+expect noise_tolerance > 0.25
