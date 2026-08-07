@@ -1,0 +1,19 @@
+# v0.9 evidence & capability floors — demand the swarm cannot meet yet.
+#
+# `capability` matches only rows holding a PASSED behavioral contract
+# (crystal v0.11: noise_shielding | pattern_completion); recorded-but-
+# failed never satisfies. `min_evidence` floors the crystal evidence
+# ladder (v0.10: absent field = 1 Observed; replicate=2, perturb=3...).
+#
+# As of 2026-08-07 the live registry holds no passed noise_shielding
+# record, so this program resolves UNRESOLVED by design — its discovery
+# request is the point: `--publish-discovery` turns the gap into swarm
+# work, and the kannaka-apps research scheduler keeps a standing order
+# for it. Supply path: evolve → promote --procedure replicate (L2) →
+# promote --procedure behavior --capability noise_shielding.
+
+cell ShieldedCore() {
+    when always => base crystal.primitive "Standing Echo" capability "noise_shielding" min_evidence 2
+}
+
+grow ShieldedCore()

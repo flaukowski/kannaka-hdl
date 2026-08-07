@@ -141,6 +141,8 @@ mod tests {
             noise_tolerance: 0.8,
             material: "metamaterial".into(),
             signature,
+            evidence_level: 1,
+            capabilities: Vec::new(),
         }
     }
 

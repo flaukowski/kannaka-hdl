@@ -374,6 +374,8 @@ mod tests {
                 noise_tolerance: 0.8,
                 material: if i == 0 { "silicon" } else { "metamaterial" }.into(),
                 signature: Vec::new(),
+                evidence_level: 1,
+                capabilities: Vec::new(),
             });
         }
         let text = emit_crystal(&p);
@@ -430,6 +432,8 @@ mod tests {
                 noise_tolerance: 0.9,
                 material: "metamaterial".into(),
                 signature: sig.clone(),
+                evidence_level: 1,
+                capabilities: Vec::new(),
             });
         }
         let v: serde_json::Value = serde_json::from_str(&emit_memory(&hybrid)).unwrap();

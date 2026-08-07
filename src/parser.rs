@@ -80,6 +80,15 @@ pub struct Query {
     pub class: String,
     pub min_persistence: f64,
     pub min_noise_tolerance: f64,
+    /// Evidence-ladder floor (crystal ADR-0004 §9, levels 0-8; crystal
+    /// v0.10 registry rows carry `evidence_level`, absent = 1 Observed).
+    /// 0 = no floor (default) — byte-identical to the pre-v0.9 grammar.
+    pub min_evidence: u8,
+    /// Behavioral-capability requirement (crystal ADR-0004 §10 / v0.11):
+    /// only rows holding a PASSED record of this contract satisfy the
+    /// query — recorded-but-failed never does, matching crystal's own
+    /// search semantics.
+    pub capability: Option<String>,
     pub material: Option<String>,
     pub strategy: Strategy,
 }
@@ -424,6 +433,8 @@ impl Parser {
             class,
             min_persistence: 0.0,
             min_noise_tolerance: 0.0,
+            min_evidence: 0,
+            capability: None,
             material: None,
             strategy: Strategy::Best,
         };
@@ -436,6 +447,20 @@ impl Parser {
                 Some(Tok::Ident(k)) if k == "min_noise_tolerance" => {
                     self.pos += 1;
                     query.min_noise_tolerance = self.expect_number()?;
+                }
+                Some(Tok::Ident(k)) if k == "min_evidence" => {
+                    self.pos += 1;
+                    let n = self.expect_number()?;
+                    if !(0.0..=8.0).contains(&n) || n.fract() != 0.0 {
+                        return Err(self.err(format!(
+                            "min_evidence must be an integer evidence-ladder level 0-8, got {n}"
+                        )));
+                    }
+                    query.min_evidence = n as u8;
+                }
+                Some(Tok::Ident(k)) if k == "capability" => {
+                    self.pos += 1;
+                    query.capability = Some(self.expect_str()?);
                 }
                 Some(Tok::Ident(k)) if k == "material" => {
                     self.pos += 1;
@@ -620,6 +645,48 @@ mod tests {
             other => panic!("expected base, got {other:?}"),
         }
         assert_eq!(prog.grows.len(), 1);
+    }
+
+    // v0.9: evidence-ladder and behavioral-capability floors.
+    #[test]
+    fn evidence_and_capability_floors_parse() {
+        let src = r#"
+            cell Core() {
+                when always => base crystal.primitive "Standing Echo" min_evidence 2 capability "noise_shielding" min_persistence 0.5
+            }
+            grow Core()
+        "#;
+        let prog = parse(src).unwrap();
+        match &prog.cells[0].rules[0].action {
+            Action::Base(q) => {
+                assert_eq!(q.min_evidence, 2);
+                assert_eq!(q.capability.as_deref(), Some("noise_shielding"));
+                assert!((q.min_persistence - 0.5).abs() < 1e-9);
+            }
+            other => panic!("expected base, got {other:?}"),
+        }
+
+        // Defaults stay byte-identical to the pre-v0.9 grammar.
+        let prog = parse(PROGRAM).unwrap();
+        match &prog.cells[0].rules[1].action {
+            Action::Base(q) => {
+                assert_eq!(q.min_evidence, 0);
+                assert_eq!(q.capability, None);
+            }
+            other => panic!("expected base, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn min_evidence_rejects_non_integer_and_out_of_range_levels() {
+        for bad in ["min_evidence 2.5", "min_evidence 9"] {
+            let src = format!("cell C() {{ when always => base \"X\" {bad} }}\ngrow C()");
+            let err = parse(&src).unwrap_err().to_string();
+            assert!(
+                err.contains("evidence-ladder level"),
+                "{bad}: unexpected error {err}"
+            );
+        }
     }
 
     #[test]

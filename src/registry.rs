@@ -24,6 +24,26 @@ struct RawPrimitive {
     /// absent in very old rows.
     #[serde(default)]
     signature: Vec<f64>,
+    /// Evidence-ladder level (crystal v0.10, ADR-0004 §9). Crystal
+    /// defines an absent field as 1 = Observed, so the serde default
+    /// must match — pre-v0.10 rows are observed, not evidence-free.
+    #[serde(default = "default_evidence_level")]
+    evidence_level: u8,
+    /// Behavioral capability records (crystal v0.11, ADR-0004 §10).
+    /// Only `passed: true` records satisfy a `capability` query.
+    #[serde(default)]
+    behavioral_capabilities: Vec<RawCapability>,
+}
+
+fn default_evidence_level() -> u8 {
+    1
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawCapability {
+    name: String,
+    #[serde(default)]
+    passed: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -52,6 +72,14 @@ pub trait Provider {
     /// A snapshot of this provider's current evidence source, recorded
     /// in the plan so resolution is reproducible.
     fn snapshot(&self) -> RegistrySnapshot;
+    /// Whether this provider can EVALUATE evidence-ladder and
+    /// behavioral-capability floors (`min_evidence` / `capability`,
+    /// v0.9). Defaults to false: a provider that cannot check a floor
+    /// must never silently satisfy a query carrying one — the query
+    /// stays unresolved with an honest warning instead (§11 spirit).
+    fn supports_evidence_floors(&self) -> bool {
+        false
+    }
     /// Whether this provider can resolve the given component type
     /// (`base crystal.primitive …`). Untyped queries always pass.
     fn supports_type(&self, component_type: &str) -> bool;
@@ -83,6 +111,15 @@ pub struct Resolved {
     /// plan JSON when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signature: Vec<f64>,
+    /// Evidence-ladder level of the resolved component (crystal v0.10).
+    /// Serde default 1 = Observed keeps pre-v0.9 plans and composites
+    /// readable, matching crystal's absent-field semantics.
+    #[serde(default = "default_evidence_level")]
+    pub evidence_level: u8,
+    /// PASSED behavioral capability names carried by the component
+    /// (crystal v0.11). Elided when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
 
 /// A record of which registry resolution consulted (ADR-0002 §7) — the
@@ -122,7 +159,17 @@ pub struct DiscoveryRequest {
 pub struct DiscoveryConstraints {
     pub min_persistence: f64,
     pub min_noise_tolerance: f64,
+    /// Evidence-ladder floor (v0.9); 0 = no floor.
+    #[serde(skip_serializing_if = "is_zero_evidence")]
+    pub min_evidence: u8,
+    /// Required PASSED behavioral capability (v0.9).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capability: Option<String>,
     pub material: Option<String>,
+}
+
+fn is_zero_evidence(v: &u8) -> bool {
+    *v == 0
 }
 
 impl DiscoveryRequest {
@@ -135,6 +182,8 @@ impl DiscoveryRequest {
             constraints: DiscoveryConstraints {
                 min_persistence: query.min_persistence,
                 min_noise_tolerance: query.min_noise_tolerance,
+                min_evidence: query.min_evidence,
+                capability: query.capability.clone(),
                 material: query.material.clone(),
             },
             requested_by_plan: String::new(),
@@ -199,15 +248,29 @@ impl Registry {
             .filter(|p| p.persistence >= min_persistence)
             .filter(|p| material.is_none_or(|m| p.material_id == m))
             .max_by(|a, b| a.persistence.total_cmp(&b.persistence))
-            .map(|p| Resolved {
-                provider: PROVIDER_CRYSTAL,
-                id: p.id.clone(),
-                class: p.class.clone(),
-                persistence: p.persistence,
-                noise_tolerance: p.noise_tolerance,
-                material: p.material_id.clone(),
-                signature: p.signature.clone(),
-            })
+            .map(raw_to_resolved)
+    }
+}
+
+/// Map a registry row to a resolved component, carrying evidence level
+/// and only the PASSED capability names (recorded-but-failed contracts
+/// never satisfy anything downstream).
+fn raw_to_resolved(p: &RawPrimitive) -> Resolved {
+    Resolved {
+        provider: PROVIDER_CRYSTAL,
+        id: p.id.clone(),
+        class: p.class.clone(),
+        persistence: p.persistence,
+        noise_tolerance: p.noise_tolerance,
+        material: p.material_id.clone(),
+        signature: p.signature.clone(),
+        evidence_level: p.evidence_level,
+        capabilities: p
+            .behavioral_capabilities
+            .iter()
+            .filter(|c| c.passed)
+            .map(|c| c.name.clone())
+            .collect(),
     }
 }
 
@@ -240,17 +303,21 @@ impl Provider for Registry {
             .filter(|p| normalize(&p.class) == want)
             .filter(|p| p.persistence >= query.min_persistence)
             .filter(|p| p.noise_tolerance >= query.min_noise_tolerance)
-            .filter(|p| query.material.as_deref().is_none_or(|m| p.material_id == m))
-            .map(|p| Resolved {
-                provider: PROVIDER_CRYSTAL,
-                id: p.id.clone(),
-                class: p.class.clone(),
-                persistence: p.persistence,
-                noise_tolerance: p.noise_tolerance,
-                material: p.material_id.clone(),
-                signature: p.signature.clone(),
+            .filter(|p| p.evidence_level >= query.min_evidence)
+            .filter(|p| {
+                query.capability.as_deref().is_none_or(|cap| {
+                    p.behavioral_capabilities
+                        .iter()
+                        .any(|c| c.passed && c.name == cap)
+                })
             })
+            .filter(|p| query.material.as_deref().is_none_or(|m| p.material_id == m))
+            .map(raw_to_resolved)
             .collect()
+    }
+
+    fn supports_evidence_floors(&self) -> bool {
+        true
     }
 }
 
@@ -300,6 +367,10 @@ impl Provider for FixtureProvider {
         true
     }
 
+    fn supports_evidence_floors(&self) -> bool {
+        true
+    }
+
     fn candidates(&self, query: &Query) -> Vec<Resolved> {
         let want = normalize(&query.class);
         self.components
@@ -307,6 +378,13 @@ impl Provider for FixtureProvider {
             .filter(|c| normalize(&c.class) == want)
             .filter(|c| c.persistence >= query.min_persistence)
             .filter(|c| c.noise_tolerance >= query.min_noise_tolerance)
+            .filter(|c| c.evidence_level >= query.min_evidence)
+            .filter(|c| {
+                query
+                    .capability
+                    .as_deref()
+                    .is_none_or(|cap| c.capabilities.iter().any(|have| have == cap))
+            })
             .filter(|c| query.material.as_deref().is_none_or(|m| c.material == m))
             .map(|c| Resolved {
                 provider: PROVIDER_FIXTURE,
@@ -359,6 +437,25 @@ fn resolve_component(
             );
         }
     }
+    // A provider that cannot EVALUATE an evidence or capability floor must
+    // not answer a query carrying one — silently dropping the floor would
+    // resolve the query against weaker evidence than the plan declares.
+    // The demand is real (the floor names a capability the resolvable
+    // world lacks), so it still becomes a discovery request.
+    if (query.min_evidence > 0 || query.capability.is_some())
+        && !provider.supports_evidence_floors()
+    {
+        return (
+            None,
+            Some(format!(
+                "provider {} cannot evaluate evidence/capability floors (min_evidence {}, capability {:?}) — query stays unresolved",
+                provider.id(),
+                query.min_evidence,
+                query.capability.as_deref().unwrap_or("-"),
+            )),
+            Some(DiscoveryRequest::for_query(query)),
+        );
+    }
     let mut candidates = provider.candidates(query);
     candidates.sort_by(|a, b| b.persistence.total_cmp(&a.persistence));
     if candidates.is_empty() {
@@ -367,6 +464,16 @@ fn resolve_component(
         } else {
             String::new()
         };
+        let evidence = if query.min_evidence > 0 {
+            format!(", min_evidence {}", query.min_evidence)
+        } else {
+            String::new()
+        };
+        let capability = query
+            .capability
+            .as_deref()
+            .map(|c| format!(", capability \"{c}\""))
+            .unwrap_or_default();
         let material = query
             .material
             .as_deref()
@@ -375,7 +482,7 @@ fn resolve_component(
         return (
             None,
             Some(format!(
-                "no component (class \"{}\", min_persistence {}{noise}{material}) — swarm has not grown one yet",
+                "no component (class \"{}\", min_persistence {}{noise}{evidence}{capability}{material}) — swarm has not grown one yet",
                 query.class, query.min_persistence
             )),
             Some(DiscoveryRequest::for_query(query)),
@@ -541,6 +648,12 @@ fn parse_recall_envelope(stdout: &str, query: &Query) -> Vec<Resolved> {
                     noise_tolerance: similarity,
                     material: "hrm".into(),
                     signature: Vec::new(),
+                    // Memory rows sit outside the crystal evidence ladder;
+                    // a memory query carrying floors is refused upstream
+                    // (supports_evidence_floors = false), so these values
+                    // are descriptive, never floor-checked.
+                    evidence_level: 1,
+                    capabilities: Vec::new(),
                 }
             })
         })
@@ -734,6 +847,12 @@ impl Provider for CompositeProvider {
                 noise_tolerance: c.noise_tolerance,
                 material: "composite".into(),
                 signature: Vec::new(),
+                // Composites carry expectation verdicts, not crystal
+                // evidence levels — queries with evidence/capability
+                // floors are refused upstream (default
+                // supports_evidence_floors = false).
+                evidence_level: 1,
+                capabilities: Vec::new(),
             })
             .collect()
     }
@@ -848,6 +967,8 @@ mod tests {
                 noise_tolerance: 0.9,
                 material: "ideal_resonator".into(),
                 signature: Vec::new(),
+                evidence_level: 1,
+                capabilities: Vec::new(),
             },
             Resolved {
                 provider: PROVIDER_FIXTURE,
@@ -857,6 +978,8 @@ mod tests {
                 noise_tolerance: 0.5,
                 material: "ideal_resonator".into(),
                 signature: Vec::new(),
+                evidence_level: 1,
+                capabilities: Vec::new(),
             },
         ]);
 
@@ -890,6 +1013,8 @@ mod tests {
             class: class.into(),
             min_persistence,
             min_noise_tolerance: 0.0,
+            min_evidence: 0,
+            capability: None,
             material: None,
             strategy: crate::parser::Strategy::Best,
         }
@@ -902,6 +1027,8 @@ mod tests {
             class: "MemorySeed".into(),
             persistence,
             noise_tolerance,
+            evidence_level: 1,
+            capabilities: Vec::new(),
             material: "ideal_resonator".into(),
             signature: Vec::new(),
         }
@@ -923,6 +1050,137 @@ mod tests {
         let mut state = StrategyState::default();
         let (picked, _, _) = resolve_component(&[&fixture], &q, &mut state);
         assert_eq!(picked.unwrap().id, "FIX-B");
+    }
+
+    // v0.9: evidence-ladder and behavioral-capability floors.
+
+    #[test]
+    fn evidence_floor_filters_candidates_and_names_itself_in_the_warning() {
+        let mut high = seed("FIX-L4", 0.9, 0.9);
+        high.evidence_level = 4;
+        let low = seed("FIX-L1", 0.95, 0.95); // stronger metrics, weaker evidence
+        let fixture = FixtureProvider::new(vec![low, high]);
+
+        let mut q = query("Memory Seed", 0.0);
+        q.min_evidence = 2;
+        let mut state = StrategyState::default();
+        let (picked, _, _) = resolve_component(&[&fixture], &q, &mut state);
+        assert_eq!(
+            picked.unwrap().id,
+            "FIX-L4",
+            "evidence floor must beat better raw metrics"
+        );
+
+        q.min_evidence = 6;
+        let (picked, reason, request) = resolve_component(&[&fixture], &q, &mut state);
+        assert!(picked.is_none());
+        assert!(
+            reason.unwrap().contains("min_evidence 6"),
+            "warning must name the unmet evidence floor"
+        );
+        assert_eq!(request.unwrap().constraints.min_evidence, 6);
+    }
+
+    #[test]
+    fn capability_floor_matches_passed_records_only() {
+        let mut shielded = seed("FIX-SHIELD", 0.6, 0.6);
+        shielded.capabilities = vec!["noise_shielding".into()];
+        let plain = seed("FIX-PLAIN", 0.9, 0.9);
+        let fixture = FixtureProvider::new(vec![plain, shielded]);
+
+        let mut q = query("Memory Seed", 0.0);
+        q.capability = Some("noise_shielding".into());
+        let mut state = StrategyState::default();
+        let (picked, _, _) = resolve_component(&[&fixture], &q, &mut state);
+        assert_eq!(picked.unwrap().id, "FIX-SHIELD");
+
+        q.capability = Some("pattern_completion".into());
+        let (picked, reason, request) = resolve_component(&[&fixture], &q, &mut state);
+        assert!(picked.is_none());
+        assert!(reason
+            .unwrap()
+            .contains("capability \"pattern_completion\""));
+        assert_eq!(
+            request.unwrap().constraints.capability.as_deref(),
+            Some("pattern_completion")
+        );
+    }
+
+    #[test]
+    fn registry_rows_satisfy_capability_only_when_passed() {
+        // Raw registry parse: one row with a failed record, one passed.
+        let json = r#"{"primitives": [
+            {"id": "CRY-FAIL", "class": "StandingEcho", "persistence": 0.9,
+             "noise_tolerance": 0.9, "material_id": "metamaterial",
+             "behavioral_capabilities": [{"name": "noise_shielding", "passed": false}]},
+            {"id": "CRY-PASS", "class": "StandingEcho", "persistence": 0.5,
+             "noise_tolerance": 0.5, "material_id": "metamaterial", "evidence_level": 2,
+             "behavioral_capabilities": [{"name": "noise_shielding", "passed": true}]}
+        ]}"#;
+        let dir = std::env::temp_dir().join(format!("khdl-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("registry.json");
+        std::fs::write(&path, json).unwrap();
+        let registry = Registry::load(&path).unwrap();
+
+        let mut q = query("Standing Echo", 0.0);
+        q.capability = Some("noise_shielding".into());
+        let hits = registry.candidates(&q);
+        assert_eq!(hits.len(), 1, "recorded-but-failed must not satisfy");
+        assert_eq!(hits[0].id, "CRY-PASS");
+        assert_eq!(hits[0].evidence_level, 2);
+        assert_eq!(hits[0].capabilities, vec!["noise_shielding".to_string()]);
+        // Absent evidence_level reads as 1 = Observed (crystal v0.10).
+        let plain = registry.candidates(&query("Standing Echo", 0.0));
+        assert!(plain
+            .iter()
+            .any(|r| r.id == "CRY-FAIL" && r.evidence_level == 1));
+    }
+
+    #[test]
+    fn providers_without_floor_support_refuse_rather_than_silently_satisfy() {
+        struct NoFloors;
+        impl Provider for NoFloors {
+            fn id(&self) -> &'static str {
+                "no-floors"
+            }
+            fn domain(&self) -> &'static str {
+                crate::grow::DOMAIN_MEMORY
+            }
+            fn snapshot(&self) -> RegistrySnapshot {
+                RegistrySnapshot {
+                    provider: "no-floors",
+                    domain: crate::grow::DOMAIN_MEMORY,
+                    source: "(test)".into(),
+                    primitives: 1,
+                }
+            }
+            fn supports_type(&self, _t: &str) -> bool {
+                true
+            }
+            fn candidates(&self, q: &Query) -> Vec<Resolved> {
+                // Would happily "satisfy" anything — which is exactly why
+                // the floor gate must run before candidates are consulted.
+                vec![seed("MEM-1", 0.9, 0.9)]
+                    .into_iter()
+                    .map(|mut r| {
+                        r.class = q.class.clone();
+                        r
+                    })
+                    .collect()
+            }
+        }
+        let provider = NoFloors;
+        let mut q = query("Anchor", 0.0);
+        q.domain = crate::grow::DOMAIN_MEMORY.into();
+        q.min_evidence = 2;
+        let mut state = StrategyState::default();
+        let (picked, reason, request) = resolve_component(&[&provider], &q, &mut state);
+        assert!(picked.is_none(), "unevaluable floor must not resolve");
+        assert!(reason
+            .unwrap()
+            .contains("cannot evaluate evidence/capability floors"));
+        assert!(request.is_some(), "unmet floor is genuine demand");
     }
 
     #[test]
@@ -1029,6 +1287,8 @@ mod tests {
                 noise_tolerance: 0.7,
                 material: "hrm".into(),
                 signature: Vec::new(),
+                evidence_level: 1,
+                capabilities: Vec::new(),
             }],
         );
         let src = r#"

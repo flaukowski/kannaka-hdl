@@ -2,6 +2,38 @@
 
 All notable changes to kannaka-hdl are documented here.
 
+## v0.9.0 — 2026-08-07
+
+Evidence-ladder and behavioral-capability floors: the query grammar
+catches up with crystal v0.10 (`evidence_level`, ADR-0004 §9) and v0.11
+(`behavioral_capabilities`, §10), so demand programs can ask for
+*validated* structure, not just class + raw metrics.
+
+### Added
+- **`min_evidence N`** query attribute (integer 0-8): candidates must
+  sit at or above N on the evidence ladder. Absent registry field reads
+  as 1 = Observed, matching crystal's own semantics.
+- **`capability "name"`** query attribute: candidates must hold a
+  **PASSED** record of the named behavioral contract —
+  recorded-but-failed never satisfies, matching crystal's search.
+- `Resolved` carries `evidence_level` + passed `capabilities` (serde
+  defaults keep old plans and composites readable).
+- Discovery requests carry the unmet `min_evidence` / `capability`
+  constraints, so §14 demand names the validation bar, not just the
+  class.
+- `Provider::supports_evidence_floors()` (default **false**): a provider
+  that cannot evaluate these floors refuses the query with an explicit
+  warning instead of silently resolving against weaker evidence — the
+  memory and composite providers refuse; the crystal registry and
+  fixtures evaluate.
+- `examples/capability-frontier.khdl`: a deliberately-unresolved demand
+  for a noise-shielded, replicated Standing Echo (no passed
+  `noise_shielding` record exists in the live registry yet).
+
+### Unchanged
+- Programs without the new attributes parse, resolve, and hash exactly
+  as before (floors default to 0 / absent).
+
 ## v0.8.0 — 2026-08-02
 
 ADR-0002 §15: composite architectures become components — the final

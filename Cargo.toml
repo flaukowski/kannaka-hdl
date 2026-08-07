@@ -1,6 +1,6 @@
 [package]
 name = "kannaka-hdl"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 description = "KannakaHDL — the Holographic Development Language: architectures grown from discovered components by recursive rewrite rules"
 license = "MIT"
