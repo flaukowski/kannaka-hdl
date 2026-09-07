@@ -47,6 +47,13 @@ pub const DOMAIN_MEMORY: &str = "memory";
 /// kannaka-apps `mind` app; component type `faculty`.
 pub const DOMAIN_MIND: &str = "mind";
 
+/// The Code domain (v0.11): components discovered in the constellation's own
+/// source — symbols, classes, files and the rationale comments beside them,
+/// as extracted by graphify into a code graph. Answered by
+/// [`crate::registry::CodeGraphProvider`] over kannaka-memory's graph index;
+/// component types `symbol`, `class`, `file`, `rationale`, `concept`.
+pub const DOMAIN_CODE: &str = "code";
+
 /// Version of the Abstract Holographic Plan schema (ADR-0002 §7).
 /// "2": queries are typed (domain/type/floors/strategy) and bridges are
 /// typed couplings carrying a full query instead of a bare class.

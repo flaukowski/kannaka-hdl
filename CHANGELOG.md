@@ -2,6 +2,46 @@
 
 All notable changes to kannaka-hdl are documented here.
 
+## v0.11.0 — 2026-09-07
+
+The **code domain**: a plan's base cases resolved against the
+constellation's own source. A code graph is a registry — it holds
+discovered components with evidence about each — so `base code.symbol
+"sendRow" material "Agent-Kax"` either resolves to a real file and line
+or stays honestly unresolved, the same contract the crystal registry
+answers.
+
+### Added
+- **`DOMAIN_CODE`** (`code`) and **`CodeGraphProvider`**, resolving
+  `symbol` / `class` / `file` / `rationale` / `concept` against
+  kannaka-memory's code-graph index (`tools/corpus/graph/graph_index.py`,
+  envelope `code-graph-resolve/1`) — the same graph the Archivist reads.
+- **`--code-index`** / **`--code-tool`** on `grow`, with
+  `$KANNAKA_CODE_INDEX` / `$KANNAKA_CODE_TOOL`. Strict mode insists on
+  the index only when the program actually asks for code components,
+  matching v0.10's treatment of the mind registry.
+- `examples/code-spine.khdl` — the graph-reading path across two
+  repositories as a structural pre-flight check.
+
+### Contract (ADR-0002 §13: an analogy, stated plainly)
+- `persistence` ← in-degree as `1 - 1/(1 + in_degree)`: how load-bearing
+  a component is in the code, not how well it works.
+- `noise_tolerance` ← the share of a component's edges graphify read
+  straight from the source (`EXTRACTED`) rather than inferred.
+- `material` ← the repository, matched tolerantly against the full name
+  or the bare name.
+- Evidence-ladder and capability floors are **refused**: code carries no
+  crystal evidence ladder and no behavioural contracts, so
+  `min_evidence` / `capability` queries stay unresolved rather than
+  being silently satisfied.
+- An index built before edges carried confidence answers **nothing**,
+  with a warning — a stale index must not read as an empty codebase.
+
+### Changed
+- `grow`'s arguments moved into a boxed `GrowArgs`: two more flags took
+  the `Command` enum to 283 bytes against `Check`'s 32, and this crate
+  suppresses no lints.
+
 ## v0.9.0 — 2026-08-07
 
 Evidence-ladder and behavioral-capability floors: the query grammar

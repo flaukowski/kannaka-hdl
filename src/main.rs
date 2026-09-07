@@ -1,10 +1,10 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use kannaka_hdl::emit;
-use kannaka_hdl::grow::{fnv1a64, grow, UnresolvedMode, DOMAIN_CRYSTAL, DOMAIN_MIND};
+use kannaka_hdl::grow::{fnv1a64, grow, UnresolvedMode, DOMAIN_CODE, DOMAIN_CRYSTAL, DOMAIN_MIND};
 use kannaka_hdl::parser::parse;
 use kannaka_hdl::registry::{
     composites_path, default_path, evaluate_expectations, resolve_plan, unresolved_count,
-    CompositeProvider, MemoryCliProvider, Provider, Registry, PROVIDER_MIND,
+    CodeGraphProvider, CompositeProvider, MemoryCliProvider, Provider, Registry, PROVIDER_MIND,
 };
 use std::path::PathBuf;
 
@@ -55,41 +55,55 @@ enum Command {
         file: PathBuf,
     },
     /// Grow a .khdl program, resolve against the primitive registry, emit
-    Grow {
-        /// Path to a .khdl file
-        file: PathBuf,
-        /// kannaka-crystal registry.json (default: crystal's data dir)
-        #[arg(long)]
-        registry: Option<PathBuf>,
-        /// A mind registry (crystal schema) answering `base mind.faculty …`
-        /// queries (v0.10; default: $KANNAKA_MIND_REGISTRY)
-        #[arg(long)]
-        mind_registry: Option<PathBuf>,
-        /// Skip registry resolution entirely
-        #[arg(long)]
-        no_resolve: bool,
-        /// Unresolved-component policy: strict fails, stub withholds
-        /// execution, speculative approximates (ADR-0002 §10)
-        #[arg(long, value_enum, default_value = "speculative")]
-        unresolved: UnresolvedCli,
-        /// Resolve memory-domain queries against a live Kannaka Memory
-        /// via the kannaka CLI (optionally give the binary path)
-        #[arg(long, num_args = 0..=1, default_missing_value = "kannaka")]
-        memory_provider: Option<PathBuf>,
-        /// Publish the plan's capability discovery requests to the
-        /// swarm work queue via `kannaka swarm enqueue` (ADR-0002 §14)
-        #[arg(long, num_args = 0..=1, default_missing_value = "kannaka")]
-        publish_discovery: Option<PathBuf>,
-        /// Register the validated plan as a composite component under
-        /// this name (ADR-0002 §15); requires full resolution
-        #[arg(long, value_name = "NAME")]
-        register_composite: Option<String>,
-        #[arg(long, value_enum, default_value = "json")]
-        emit: EmitKind,
-        /// Output file (default: stdout)
-        #[arg(short, long)]
-        out: Option<PathBuf>,
-    },
+    Grow(Box<GrowArgs>),
+}
+
+/// `grow`'s arguments. A struct rather than variant fields, boxed into
+/// [`Command::Grow`]: the variant outgrew `Check` by 250 bytes and this crate
+/// suppresses no lints.
+#[derive(clap::Args)]
+pub struct GrowArgs {
+    /// Path to a .khdl file
+    file: PathBuf,
+    /// kannaka-crystal registry.json (default: crystal's data dir)
+    #[arg(long)]
+    registry: Option<PathBuf>,
+    /// A mind registry (crystal schema) answering `base mind.faculty …`
+    /// queries (v0.10; default: $KANNAKA_MIND_REGISTRY)
+    #[arg(long)]
+    mind_registry: Option<PathBuf>,
+    /// Skip registry resolution entirely
+    #[arg(long)]
+    no_resolve: bool,
+    /// Unresolved-component policy: strict fails, stub withholds
+    /// execution, speculative approximates (ADR-0002 §10)
+    #[arg(long, value_enum, default_value = "speculative")]
+    unresolved: UnresolvedCli,
+    /// Resolve memory-domain queries against a live Kannaka Memory
+    /// via the kannaka CLI (optionally give the binary path)
+    #[arg(long, num_args = 0..=1, default_missing_value = "kannaka")]
+    memory_provider: Option<PathBuf>,
+    /// Resolve `base code.symbol …` queries against a kannaka-memory
+    /// code-graph index (v0.11; default: $KANNAKA_CODE_INDEX)
+    #[arg(long)]
+    code_index: Option<PathBuf>,
+    /// The index tool that reads it (default: $KANNAKA_CODE_TOOL, else
+    /// graph_index.py beside the index)
+    #[arg(long)]
+    code_tool: Option<PathBuf>,
+    /// Publish the plan's capability discovery requests to the
+    /// swarm work queue via `kannaka swarm enqueue` (ADR-0002 §14)
+    #[arg(long, num_args = 0..=1, default_missing_value = "kannaka")]
+    publish_discovery: Option<PathBuf>,
+    /// Register the validated plan as a composite component under
+    /// this name (ADR-0002 §15); requires full resolution
+    #[arg(long, value_name = "NAME")]
+    register_composite: Option<String>,
+    #[arg(long, value_enum, default_value = "json")]
+    emit: EmitKind,
+    /// Output file (default: stdout)
+    #[arg(short, long)]
+    out: Option<PathBuf>,
 }
 
 fn main() {
@@ -117,18 +131,21 @@ fn dispatch(command: Command) -> Result<(), String> {
             );
             Ok(())
         }
-        Command::Grow {
-            file,
-            registry,
-            mind_registry,
-            no_resolve,
-            unresolved,
-            memory_provider,
-            publish_discovery,
-            register_composite,
-            emit,
-            out,
-        } => {
+        Command::Grow(args) => {
+            let GrowArgs {
+                file,
+                registry,
+                mind_registry,
+                no_resolve,
+                unresolved,
+                memory_provider,
+                code_index,
+                code_tool,
+                publish_discovery,
+                register_composite,
+                emit,
+                out,
+            } = *args;
             let source =
                 std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
             let program = parse(&source).map_err(|e| e.to_string())?;
@@ -188,6 +205,43 @@ fn dispatch(command: Command) -> Result<(), String> {
                     }
                     None => None,
                 };
+                let code_index_path = code_index
+                    .or_else(|| std::env::var_os("KANNAKA_CODE_INDEX").map(PathBuf::from));
+                let wants_code = plan.leaves.iter().any(|l| l.domain == DOMAIN_CODE)
+                    || plan.bridges.iter().any(|b| b.domain == DOMAIN_CODE);
+                let code = match code_index_path {
+                    Some(idx) if idx.exists() => {
+                        let tool = code_tool
+                            .or_else(|| std::env::var_os("KANNAKA_CODE_TOOL").map(PathBuf::from))
+                            .unwrap_or_else(|| {
+                                idx.parent()
+                                    .unwrap_or_else(|| std::path::Path::new("."))
+                                    .join("graph_index.py")
+                            });
+                        Some(CodeGraphProvider::new(tool, idx))
+                    }
+                    Some(idx) if strict && wants_code => {
+                        return Err(format!(
+                            "strict mode: code graph index not found at {}",
+                            idx.display()
+                        ));
+                    }
+                    Some(idx) => {
+                        plan.warnings
+                            .push(format!("code graph index not found: {}", idx.display()));
+                        eprintln!(
+                            "warning: no code graph index at {} — code queries stay unresolved",
+                            idx.display()
+                        );
+                        None
+                    }
+                    None if wants_code && strict => {
+                        return Err(
+                            "strict mode: program has code.* queries but no --code-index / $KANNAKA_CODE_INDEX".into(),
+                        );
+                    }
+                    None => None,
+                };
                 let mut providers: Vec<&dyn Provider> = Vec::new();
                 if let Some(reg) = &crystal {
                     providers.push(reg);
@@ -197,6 +251,9 @@ fn dispatch(command: Command) -> Result<(), String> {
                 }
                 if let Some(memory) = &memory {
                     providers.push(memory);
+                }
+                if let Some(code) = &code {
+                    providers.push(code);
                 }
                 let composites = CompositeProvider::load(&composites_path()).ok();
                 if let Some(composites) = &composites {
