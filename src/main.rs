@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use kannaka_hdl::emit;
-use kannaka_hdl::grow::{fnv1a64, grow, UnresolvedMode, DOMAIN_MIND};
+use kannaka_hdl::grow::{fnv1a64, grow, UnresolvedMode, DOMAIN_CRYSTAL, DOMAIN_MIND};
 use kannaka_hdl::parser::parse;
 use kannaka_hdl::registry::{
     composites_path, default_path, evaluate_expectations, resolve_plan, unresolved_count,
@@ -146,16 +146,22 @@ fn dispatch(command: Command) -> Result<(), String> {
             } else {
                 let path = registry.unwrap_or_else(default_path);
                 let memory = memory_provider.map(MemoryCliProvider::new);
+                // v0.10: a program that never asks for a crystal (a Mind, a memory
+                // gate) does not need the crystal registry to exist — strict mode
+                // only insists on the registries the plan actually queries.
+                let wants_crystal = plan.leaves.iter().any(|l| l.domain == DOMAIN_CRYSTAL)
+                    || plan.bridges.iter().any(|b| b.domain == DOMAIN_CRYSTAL);
                 let crystal = match Registry::load(&path) {
                     Ok(reg) => Some(reg),
-                    Err(e) if strict => {
+                    Err(e) if strict && wants_crystal => {
                         return Err(format!("strict mode: registry unavailable: {e}"));
                     }
-                    Err(e) => {
+                    Err(e) if wants_crystal => {
                         plan.warnings.push(format!("registry unavailable: {e}"));
                         eprintln!("warning: {e} — crystal queries stay unresolved");
                         None
                     }
+                    Err(_) => None,
                 };
 
                 let mind_path = mind_registry
