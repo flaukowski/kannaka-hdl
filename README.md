@@ -104,3 +104,19 @@ Releases are tagged `v*` and ship musl-static Linux binaries, Windows, and macOS
 ## License
 
 [Space Child License v1.0](LICENSE) — free for peaceful use.
+
+## The `mind` domain (v0.10)
+
+A citizen of OpenBotCity is a grown architecture: `base mind.faculty "Voice" min_persistence 0.2
+capability "voice"` resolves against a **mind registry** — the crystal registry schema, a different
+file — built from live probes of the substrate (served brain tags and their voice-judge scores, a
+tool-call probe, presence, studio access, the fossil record) by the kannaka-apps `mind` app.
+
+```sh
+kannaka-hdl grow mind.khdl --mind-registry /srv/rogue/instances/rogue/mind-registry.json --unresolved strict
+KANNAKA_MIND_REGISTRY=... kannaka-hdl grow mind.khdl --emit json
+```
+
+Floors (`min_persistence`, `min_evidence`, `capability`, `material`) mean exactly what they mean for
+crystals. The crystal registry never answers a mind query and a mind registry never answers a crystal
+one (domain isolation, tested). Unresolved faculties are demand, routed by the app.

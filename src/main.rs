@@ -1,10 +1,10 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use kannaka_hdl::emit;
-use kannaka_hdl::grow::{fnv1a64, grow, UnresolvedMode};
+use kannaka_hdl::grow::{fnv1a64, grow, UnresolvedMode, DOMAIN_CRYSTAL, DOMAIN_MIND};
 use kannaka_hdl::parser::parse;
 use kannaka_hdl::registry::{
     composites_path, default_path, evaluate_expectations, resolve_plan, unresolved_count,
-    CompositeProvider, MemoryCliProvider, Provider, Registry,
+    CompositeProvider, MemoryCliProvider, Provider, Registry, PROVIDER_MIND,
 };
 use std::path::PathBuf;
 
@@ -61,6 +61,10 @@ enum Command {
         /// kannaka-crystal registry.json (default: crystal's data dir)
         #[arg(long)]
         registry: Option<PathBuf>,
+        /// A mind registry (crystal schema) answering `base mind.faculty …`
+        /// queries (v0.10; default: $KANNAKA_MIND_REGISTRY)
+        #[arg(long)]
+        mind_registry: Option<PathBuf>,
         /// Skip registry resolution entirely
         #[arg(long)]
         no_resolve: bool,
@@ -116,6 +120,7 @@ fn dispatch(command: Command) -> Result<(), String> {
         Command::Grow {
             file,
             registry,
+            mind_registry,
             no_resolve,
             unresolved,
             memory_provider,
@@ -141,20 +146,53 @@ fn dispatch(command: Command) -> Result<(), String> {
             } else {
                 let path = registry.unwrap_or_else(default_path);
                 let memory = memory_provider.map(MemoryCliProvider::new);
+                // v0.10: a program that never asks for a crystal (a Mind, a memory
+                // gate) does not need the crystal registry to exist — strict mode
+                // only insists on the registries the plan actually queries.
+                let wants_crystal = plan.leaves.iter().any(|l| l.domain == DOMAIN_CRYSTAL)
+                    || plan.bridges.iter().any(|b| b.domain == DOMAIN_CRYSTAL);
                 let crystal = match Registry::load(&path) {
                     Ok(reg) => Some(reg),
-                    Err(e) if strict => {
+                    Err(e) if strict && wants_crystal => {
                         return Err(format!("strict mode: registry unavailable: {e}"));
                     }
-                    Err(e) => {
+                    Err(e) if wants_crystal => {
                         plan.warnings.push(format!("registry unavailable: {e}"));
                         eprintln!("warning: {e} — crystal queries stay unresolved");
                         None
                     }
+                    Err(_) => None,
                 };
 
+                let mind_path = mind_registry
+                    .or_else(|| std::env::var_os("KANNAKA_MIND_REGISTRY").map(PathBuf::from));
+                let wants_mind = plan.leaves.iter().any(|l| l.domain == DOMAIN_MIND)
+                    || plan.bridges.iter().any(|b| b.domain == DOMAIN_MIND);
+                let mind = match mind_path {
+                    Some(p) => match Registry::load_for(&p, DOMAIN_MIND, PROVIDER_MIND) {
+                        Ok(reg) => Some(reg),
+                        Err(e) if strict => {
+                            return Err(format!("strict mode: mind registry unavailable: {e}"));
+                        }
+                        Err(e) => {
+                            plan.warnings
+                                .push(format!("mind registry unavailable: {e}"));
+                            eprintln!("warning: {e} — mind queries stay unresolved");
+                            None
+                        }
+                    },
+                    None if wants_mind && strict => {
+                        return Err(
+                            "strict mode: program has mind.faculty queries but no --mind-registry / $KANNAKA_MIND_REGISTRY".into(),
+                        );
+                    }
+                    None => None,
+                };
                 let mut providers: Vec<&dyn Provider> = Vec::new();
                 if let Some(reg) = &crystal {
+                    providers.push(reg);
+                }
+                if let Some(reg) = &mind {
                     providers.push(reg);
                 }
                 if let Some(memory) = &memory {
@@ -171,10 +209,16 @@ fn dispatch(command: Command) -> Result<(), String> {
                         .as_ref()
                         .map(|r| format!("{} ({} primitives)", r.source.display(), r.len()))
                         .unwrap_or_else(|| "no crystal registry".into()),
-                    if memory.is_some() {
-                        " + live kannaka memory"
-                    } else {
-                        ""
+                    match (&mind, memory.is_some()) {
+                        (Some(m), true) => format!(
+                            " + mind {} ({} faculties) + live kannaka memory",
+                            m.source.display(),
+                            m.len()
+                        ),
+                        (Some(m), false) =>
+                            format!(" + mind {} ({} faculties)", m.source.display(), m.len()),
+                        (None, true) => " + live kannaka memory".to_string(),
+                        (None, false) => String::new(),
                     },
                     plan.warnings.len()
                 );
