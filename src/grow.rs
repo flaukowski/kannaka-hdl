@@ -40,6 +40,13 @@ pub const DOMAIN_CRYSTAL: &str = "crystal";
 /// `memory` backend; resolvable through any provider answering for it.
 pub const DOMAIN_MEMORY: &str = "memory";
 
+/// The Mind domain (v0.10): faculties a citizen can be grown from —
+/// served brains and their judge scores, tool-call probes, presence,
+/// studio access, the fossil record. Answered by a second registry in
+/// the crystal schema (`--mind-registry`), built from live probes by the
+/// kannaka-apps `mind` app; component type `faculty`.
+pub const DOMAIN_MIND: &str = "mind";
+
 /// Version of the Abstract Holographic Plan schema (ADR-0002 §7).
 /// "2": queries are typed (domain/type/floors/strategy) and bridges are
 /// typed couplings carrying a full query instead of a bare class.

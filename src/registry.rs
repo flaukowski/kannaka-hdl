@@ -54,6 +54,10 @@ struct RawRegistry {
 /// The provider identifier the Crystal registry answers as (ADR-0002 §2).
 pub const PROVIDER_CRYSTAL: &str = "crystal-registry";
 
+/// The provider identifier a mind registry answers as (v0.10): the same
+/// schema and floors as the crystal registry, a different domain and file.
+pub const PROVIDER_MIND: &str = "mind-registry";
+
 /// A component provider (ADR-0002 §2): something that answers component
 /// queries for one domain. The Crystal registry is the first
 /// implementation; Memory (HRM) and NATS swarm providers take the same
@@ -194,6 +198,10 @@ impl DiscoveryRequest {
 pub struct Registry {
     primitives: Vec<RawPrimitive>,
     pub source: PathBuf,
+    /// The domain this registry answers for (`crystal` by default; `mind`
+    /// for a registry loaded with [`Registry::load_for`]).
+    domain: &'static str,
+    provider_id: &'static str,
 }
 
 fn normalize(class: &str) -> String {
@@ -216,12 +224,25 @@ pub fn default_path() -> PathBuf {
 
 impl Registry {
     pub fn load(path: &Path) -> Result<Self, String> {
+        Self::load_for(path, crate::grow::DOMAIN_CRYSTAL, PROVIDER_CRYSTAL)
+    }
+
+    /// Load a registry in the crystal schema that answers for another
+    /// domain (v0.10: `mind`). Floors and matching are identical; only the
+    /// domain, the component type and the provider label differ.
+    pub fn load_for(
+        path: &Path,
+        domain: &'static str,
+        provider_id: &'static str,
+    ) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let raw: RawRegistry =
             serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
         Ok(Registry {
             primitives: raw.primitives,
             source: path.to_path_buf(),
+            domain,
+            provider_id,
         })
     }
 
@@ -248,16 +269,16 @@ impl Registry {
             .filter(|p| p.persistence >= min_persistence)
             .filter(|p| material.is_none_or(|m| p.material_id == m))
             .max_by(|a, b| a.persistence.total_cmp(&b.persistence))
-            .map(raw_to_resolved)
+            .map(|p| raw_to_resolved(p, self.provider_id))
     }
 }
 
 /// Map a registry row to a resolved component, carrying evidence level
 /// and only the PASSED capability names (recorded-but-failed contracts
 /// never satisfy anything downstream).
-fn raw_to_resolved(p: &RawPrimitive) -> Resolved {
+fn raw_to_resolved(p: &RawPrimitive, provider: &'static str) -> Resolved {
     Resolved {
-        provider: PROVIDER_CRYSTAL,
+        provider,
         id: p.id.clone(),
         class: p.class.clone(),
         persistence: p.persistence,
@@ -276,24 +297,28 @@ fn raw_to_resolved(p: &RawPrimitive) -> Resolved {
 
 impl Provider for Registry {
     fn id(&self) -> &'static str {
-        PROVIDER_CRYSTAL
+        self.provider_id
     }
 
     fn domain(&self) -> &'static str {
-        crate::grow::DOMAIN_CRYSTAL
+        self.domain
     }
 
     fn snapshot(&self) -> RegistrySnapshot {
         RegistrySnapshot {
-            provider: PROVIDER_CRYSTAL,
-            domain: crate::grow::DOMAIN_CRYSTAL,
+            provider: self.provider_id,
+            domain: self.domain,
             source: self.source.display().to_string(),
             primitives: self.len(),
         }
     }
 
     fn supports_type(&self, component_type: &str) -> bool {
-        component_type == "primitive"
+        if self.domain == crate::grow::DOMAIN_MIND {
+            component_type == "faculty"
+        } else {
+            component_type == "primitive"
+        }
     }
 
     fn candidates(&self, query: &Query) -> Vec<Resolved> {
@@ -312,7 +337,7 @@ impl Provider for Registry {
                 })
             })
             .filter(|p| query.material.as_deref().is_none_or(|m| p.material_id == m))
-            .map(raw_to_resolved)
+            .map(|p| raw_to_resolved(p, self.provider_id))
             .collect()
     }
 
@@ -1519,5 +1544,89 @@ mod tests {
             .filter_map(|l| l.resolved.as_ref())
             .all(|r| r.provider == PROVIDER_CRYSTAL));
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod mind_domain_tests {
+    use super::*;
+    use crate::grow::{grow, DOMAIN_CRYSTAL, DOMAIN_MIND};
+    use crate::parser::parse;
+
+    fn faculties() -> Vec<RawPrimitive> {
+        vec![RawPrimitive {
+            id: "voice:kannaka-brain-7b-v1".into(),
+            class: "Voice".into(),
+            persistence: 0.203,
+            noise_tolerance: 0.0,
+            material_id: "kannaka-brain-7b-v1".into(),
+            signature: vec![],
+            evidence_level: 6,
+            behavioral_capabilities: vec![RawCapability {
+                name: "voice".into(),
+                passed: true,
+            }],
+        }]
+    }
+
+    fn registry(domain: &'static str, provider_id: &'static str) -> Registry {
+        Registry {
+            primitives: faculties(),
+            source: PathBuf::from("mind-registry.json"),
+            domain,
+            provider_id,
+        }
+    }
+
+    const PROGRAM: &str = r#"
+        cell Voice() {
+            when always => base mind.faculty "Voice" min_persistence 0.2 min_evidence 2 capability "voice"
+        }
+        grow Voice()
+    "#;
+
+    #[test]
+    fn a_mind_registry_answers_mind_faculty_queries() {
+        let program = parse(PROGRAM).unwrap();
+        let mut plan = grow(&program).unwrap();
+        let mind = registry(DOMAIN_MIND, PROVIDER_MIND);
+        resolve_plan(&mut plan, &[&mind]);
+        let leaf = &plan.leaves[0];
+        assert_eq!(leaf.domain, DOMAIN_MIND);
+        let r = leaf.resolved.as_ref().expect("the faculty resolves");
+        assert_eq!(r.provider, PROVIDER_MIND);
+        assert_eq!(r.material, "kannaka-brain-7b-v1");
+        assert!(r.capabilities.contains(&"voice".to_string()));
+        assert!(plan
+            .registry_snapshots
+            .iter()
+            .any(|s| s.domain == DOMAIN_MIND));
+    }
+
+    #[test]
+    fn the_crystal_registry_never_answers_for_minds() {
+        let program = parse(PROGRAM).unwrap();
+        let mut plan = grow(&program).unwrap();
+        let crystal = registry(DOMAIN_CRYSTAL, PROVIDER_CRYSTAL);
+        resolve_plan(&mut plan, &[&crystal]);
+        assert!(
+            plan.leaves[0].resolved.is_none(),
+            "same class, wrong domain: must stay unresolved"
+        );
+    }
+
+    #[test]
+    fn floors_still_hold_in_the_mind_domain() {
+        let program = parse(
+            r#"cell Voice() { when always => base mind.faculty "Voice" min_persistence 0.5 } grow Voice()"#,
+        )
+        .unwrap();
+        let mut plan = grow(&program).unwrap();
+        let mind = registry(DOMAIN_MIND, PROVIDER_MIND);
+        resolve_plan(&mut plan, &[&mind]);
+        assert!(
+            plan.leaves[0].resolved.is_none(),
+            "a 0.203 voice does not clear a 0.5 floor"
+        );
     }
 }
