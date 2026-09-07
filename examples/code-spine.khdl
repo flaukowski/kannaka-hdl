@@ -1,0 +1,62 @@
+# The code spine of the graph-reading path (v0.11, code domain).
+#
+# Every base case here is a REAL symbol in the constellation's own source,
+# resolved against a kannaka-memory code graph. Run it with --code-index and
+# --unresolved strict and it becomes a structural pre-flight check: if a piece
+# of the path is deleted, renamed, or left with nothing calling it, the build
+# fails and names what went missing.
+#
+#   kannaka-hdl grow examples/code-spine.khdl \
+#       --code-index ~/graphify-corpus/graph-index.sqlite --unresolved strict
+#
+# The spine spans two repositories, which is what `material` is for: the graph
+# is found in kannaka-memory and read by a citizen in rogue-agent.
+#
+# The floors are the point:
+#
+#   min_persistence      how load-bearing the symbol is, from its in-degree.
+#                        0.3 means "at least one thing calls it" — a spine
+#                        part nothing calls is not a spine part any more.
+#   min_noise_tolerance  the share of its edges graphify read straight from
+#                        the source rather than inferring. 0.9 keeps the gate
+#                        on facts, not on the graph's own guesses.
+#
+# Two honest limits, worth knowing before you trust a plan like this:
+#
+#   * A bare name can be ambiguous inside one repository. `norm` in
+#     kannaka-memory is both a Python helper and a Rust function, and the
+#     provider answers with the most load-bearing of them. Name spine parts
+#     that are unique, or read the resolved file:line in the plan and check.
+#   * Evidence-ladder and capability floors are refused outright here: code
+#     carries no crystal evidence ladder and no behavioural contracts, and a
+#     floor that cannot be evaluated must never be silently satisfied.
+
+cell Spine() {
+    when always => split Finding(), Reading()
+}
+
+# Finding the right subgraph for a question (kannaka-memory).
+cell Finding() {
+    when always => split Identifiers(), Lookup()
+}
+
+# Pulling the code-shaped names out of a plain question.
+cell Identifiers() {
+    when always => base code.symbol "identifiers" material "kannaka-memory" min_persistence 0.3 min_noise_tolerance 0.9
+}
+
+# Matching them against the graph and rendering the neighbourhood.
+cell Lookup() {
+    when always => base code.symbol "lookup" material "kannaka-memory" min_persistence 0.3 min_noise_tolerance 0.9
+}
+
+# The citizen that asks for the excerpt and answers from it (rogue-agent).
+cell Reading() {
+    when always => base code.symbol "graph_context" material "rogue-agent" min_persistence 0.3 min_noise_tolerance 0.9
+}
+
+grow Spine()
+
+expect unresolved_components == 0
+expect capacity >= 3
+expect noise_tolerance > 0.85

@@ -737,6 +737,195 @@ impl Provider for MemoryCliProvider {
     }
 }
 
+/// The provider id for the code-graph domain (v0.11).
+pub const PROVIDER_CODE_GRAPH: &str = "code-graph";
+
+/// The envelope version this provider understands from the index tool.
+const CODE_GRAPH_SCHEMA: &str = "code-graph-resolve/1";
+
+/// Resolves `base code.symbol …` queries against kannaka-memory's code-graph
+/// index (`tools/corpus/graph/graph_index.py`), the same graph the Archivist
+/// reads. A code graph is a registry of discovered components: symbols,
+/// classes, files, and the rationale comments beside them.
+///
+/// Contract mapping (`code-graph-resolve/1`) — an analogy, stated plainly, in
+/// the spirit of ADR-0002 §13:
+///
+/// * `persistence` ← in-degree, as `1 - 1/(1 + in_degree)`. A symbol nothing
+///   calls is ephemeral; one many things call is load-bearing. It says how
+///   established a component is in the code, not how well it works.
+/// * `noise_tolerance` ← the share of its edges graphify tagged `EXTRACTED`
+///   (explicit in the source) rather than `INFERRED` (resolved by graphify).
+///   It says how much of the component's neighbourhood is fact rather than
+///   inference — a real tolerance for the graph's own noise.
+/// * `material` ← the repository. That is the medium the component was grown
+///   in, matched tolerantly against the full name or the bare name.
+///
+/// Evidence floors are NOT supported: code carries no crystal evidence ladder
+/// and no behavioural capability contracts, so a query with `min_evidence` or
+/// `capability` stays unresolved rather than being silently satisfied.
+///
+/// An index built before edges carried confidence cannot support a
+/// `min_noise_tolerance` floor at all, so this provider answers nothing from
+/// one and says why — a stale index must not look like an empty codebase.
+pub struct CodeGraphProvider {
+    /// The index tool (`graph_index.py`).
+    pub tool: PathBuf,
+    /// The SQLite index it reads.
+    pub index: PathBuf,
+    /// Interpreter to run the tool with.
+    pub python: PathBuf,
+    pub limit: usize,
+}
+
+impl CodeGraphProvider {
+    pub fn new(tool: PathBuf, index: PathBuf) -> Self {
+        CodeGraphProvider {
+            tool,
+            index,
+            python: PathBuf::from("python3"),
+            limit: 8,
+        }
+    }
+}
+
+/// How load-bearing a component is: 0 for something nothing references,
+/// approaching 1 for a hub. Saturating rather than linear so one more caller
+/// matters most at the start, where it distinguishes dead code from live.
+fn code_persistence(in_degree: u64) -> f64 {
+    1.0 - 1.0 / (1.0 + in_degree as f64)
+}
+
+/// The share of a component's edges that graphify read directly from the
+/// source. `None` when the index cannot say — never guessed.
+fn code_noise_tolerance(extracted: Option<u64>, inferred: Option<u64>) -> Option<f64> {
+    let (e, i) = (extracted?, inferred?);
+    match e + i {
+        0 => Some(1.0), // no edges to be wrong about
+        total => Some(e as f64 / total as f64),
+    }
+}
+
+/// Parse the index tool's JSON envelope into candidates — pure, so the mapping
+/// is testable without python, an index, or a repository.
+fn parse_code_graph_envelope(stdout: &str, query: &Query) -> Vec<Resolved> {
+    // One line per envelope is the contract, and scanning lines skips any banner the
+    // interpreter prints first; a pretty-printed envelope is the same contract in a
+    // different shape, so fall back to the whole of stdout rather than reading it as silence.
+    let parsed = stdout
+        .lines()
+        .filter(|l| l.trim_start().starts_with('{'))
+        .find_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .or_else(|| {
+            let from = stdout.find('{')?;
+            serde_json::from_str::<serde_json::Value>(&stdout[from..]).ok()
+        });
+    let Some(envelope) = parsed
+        .filter(|v| v.get("schema_version").and_then(|s| s.as_str()) == Some(CODE_GRAPH_SCHEMA))
+    else {
+        return Vec::new();
+    };
+    // An index that cannot report confidence cannot honour a noise floor, and
+    // must not answer as though it could.
+    if envelope.get("confidence").and_then(|c| c.as_bool()) != Some(true) {
+        eprintln!(
+            "warning: code graph index has no edge confidence (built before it) — \
+             code queries stay unresolved until it is rebuilt"
+        );
+        return Vec::new();
+    }
+    let Some(data) = envelope.get("data").and_then(|d| d.as_array()) else {
+        return Vec::new();
+    };
+    data.iter()
+        .filter_map(|c| {
+            let id = c.get("id")?.as_str()?.to_string();
+            let repo = c.get("repo")?.as_str()?.to_string();
+            let in_degree = c.get("in_degree")?.as_u64()?;
+            let persistence = code_persistence(in_degree);
+            let noise_tolerance = code_noise_tolerance(
+                c.get("extracted").and_then(|v| v.as_u64()),
+                c.get("inferred").and_then(|v| v.as_u64()),
+            )?;
+            (persistence >= query.min_persistence && noise_tolerance >= query.min_noise_tolerance)
+                .then_some(Resolved {
+                    provider: PROVIDER_CODE_GRAPH,
+                    id,
+                    class: query.class.clone(),
+                    persistence,
+                    noise_tolerance,
+                    material: repo,
+                    signature: Vec::new(),
+                    // Code sits outside the crystal evidence ladder; floors are
+                    // refused upstream, so this is descriptive, never checked.
+                    evidence_level: 1,
+                    capabilities: Vec::new(),
+                })
+        })
+        .collect()
+}
+
+impl Provider for CodeGraphProvider {
+    fn id(&self) -> &'static str {
+        PROVIDER_CODE_GRAPH
+    }
+
+    fn domain(&self) -> &'static str {
+        crate::grow::DOMAIN_CODE
+    }
+
+    fn snapshot(&self) -> RegistrySnapshot {
+        RegistrySnapshot {
+            provider: PROVIDER_CODE_GRAPH,
+            domain: crate::grow::DOMAIN_CODE,
+            source: self.index.display().to_string(),
+            primitives: 0,
+        }
+    }
+
+    fn supports_type(&self, component_type: &str) -> bool {
+        matches!(
+            component_type,
+            "symbol" | "class" | "file" | "rationale" | "concept"
+        )
+    }
+
+    fn candidates(&self, query: &Query) -> Vec<Resolved> {
+        let mut args: Vec<String> = vec![
+            self.tool.display().to_string(),
+            "resolve".into(),
+            "--index".into(),
+            self.index.display().to_string(),
+            "--class".into(),
+            query.class.clone(),
+            "--limit".into(),
+            self.limit.to_string(),
+        ];
+        if let Some(t) = &query.component_type {
+            args.push("--type".into());
+            args.push(t.clone());
+        }
+        if let Some(m) = &query.material {
+            args.push("--material".into());
+            args.push(m.clone());
+        }
+        match std::process::Command::new(&self.python)
+            .args(&args)
+            .output()
+        {
+            Ok(out) => parse_code_graph_envelope(&String::from_utf8_lossy(&out.stdout), query),
+            Err(e) => {
+                eprintln!(
+                    "warning: code graph provider unavailable ({} {}: {e}) — code queries stay unresolved",
+                    self.python.display(),
+                    self.tool.display()
+                );
+                Vec::new()
+            }
+        }
+    }
+}
+
 /// The domain and provider id for registered composite architectures.
 pub const DOMAIN_COMPOSITE: &str = "composite";
 pub const PROVIDER_COMPOSITE: &str = "composite-registry";
@@ -979,6 +1168,126 @@ mod tests {
         )
         .unwrap();
         path
+    }
+
+    // ---- code-graph provider (v0.11) -----------------------------------
+
+    fn code_query(class: &str) -> Query {
+        Query {
+            domain: crate::grow::DOMAIN_CODE.into(),
+            component_type: Some("symbol".into()),
+            class: class.into(),
+            min_persistence: 0.0,
+            min_noise_tolerance: 0.0,
+            min_evidence: 0,
+            capability: None,
+            material: None,
+            strategy: crate::parser::Strategy::Best,
+        }
+    }
+
+    fn code_envelope(items: &str) -> String {
+        format!(r#"{{"schema_version":"code-graph-resolve/1","confidence":true,"data":[{items}]}}"#)
+    }
+
+    #[test]
+    fn code_persistence_reads_in_degree_as_how_load_bearing_a_symbol_is() {
+        assert_eq!(code_persistence(0), 0.0); // nothing calls it
+        assert!((code_persistence(1) - 0.5).abs() < 1e-9);
+        assert!(code_persistence(20) > 0.95); // a hub
+        assert!(code_persistence(5) > code_persistence(4)); // monotone
+    }
+
+    #[test]
+    fn code_noise_tolerance_is_the_extracted_share_and_never_guessed() {
+        assert_eq!(code_noise_tolerance(Some(3), Some(1)), Some(0.75));
+        assert_eq!(code_noise_tolerance(Some(0), Some(0)), Some(1.0)); // no edges to be wrong about
+        assert_eq!(code_noise_tolerance(None, Some(1)), None); // an index that cannot say
+        assert_eq!(code_noise_tolerance(Some(1), None), None);
+    }
+
+    #[test]
+    fn code_graph_envelope_maps_facts_onto_the_plan_vocabulary() {
+        let out = parse_code_graph_envelope(
+            &code_envelope(
+                r#"{"id":"NickFlach/Agent-Kax@src/lib/chainRevocation.ts:L139#sendRow()",
+                    "label":"sendRow()","kind":"symbol","repo":"NickFlach/Agent-Kax",
+                    "file":"src/lib/chainRevocation.ts","loc":"L139",
+                    "in_degree":1,"out_degree":5,"extracted":6,"inferred":0}"#,
+            ),
+            &code_query("sendRow"),
+        );
+        assert_eq!(out.len(), 1);
+        let r = &out[0];
+        assert_eq!(r.provider, PROVIDER_CODE_GRAPH);
+        assert_eq!(r.material, "NickFlach/Agent-Kax"); // the medium it was grown in
+        assert!(r.id.contains("chainRevocation.ts:L139"));
+        assert!((r.persistence - 0.5).abs() < 1e-9);
+        assert_eq!(r.noise_tolerance, 1.0);
+        assert_eq!(r.evidence_level, 1);
+        assert!(r.capabilities.is_empty() && r.signature.is_empty());
+    }
+
+    #[test]
+    fn code_graph_honours_persistence_and_noise_floors() {
+        let items = r#"{"id":"r@f:L1#hub","label":"hub","kind":"symbol","repo":"r","file":"f","loc":"L1",
+                        "in_degree":9,"out_degree":0,"extracted":1,"inferred":1}"#;
+        let mut q = code_query("hub");
+        assert_eq!(
+            parse_code_graph_envelope(&code_envelope(items), &q).len(),
+            1
+        );
+        q.min_persistence = 0.95; // 9 callers gives 0.9
+        assert!(parse_code_graph_envelope(&code_envelope(items), &q).is_empty());
+        let mut q = code_query("hub");
+        q.min_noise_tolerance = 0.75; // half its edges are INFERRED
+        assert!(parse_code_graph_envelope(&code_envelope(items), &q).is_empty());
+    }
+
+    #[test]
+    fn code_graph_answers_nothing_from_an_index_that_cannot_report_confidence() {
+        // A stale index must not read as an empty codebase, and must never
+        // satisfy a noise floor it cannot evaluate.
+        let stale = r#"{"schema_version":"code-graph-resolve/1","confidence":false,"data":[
+            {"id":"r@f:L1#x","label":"x","kind":"symbol","repo":"r","file":"f","loc":"L1",
+             "in_degree":3,"out_degree":1,"extracted":null,"inferred":null}]}"#;
+        assert!(parse_code_graph_envelope(stale, &code_query("x")).is_empty());
+    }
+
+    #[test]
+    fn code_graph_ignores_output_that_is_not_its_contract() {
+        assert!(parse_code_graph_envelope("", &code_query("x")).is_empty());
+        assert!(parse_code_graph_envelope("not json at all", &code_query("x")).is_empty());
+        // a different schema version is not this contract
+        assert!(parse_code_graph_envelope(
+            r#"{"schema_version":"code-graph-resolve/2","confidence":true,"data":[]}"#,
+            &code_query("x")
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn code_graph_provider_declares_its_domain_types_and_refuses_evidence_floors() {
+        let p = CodeGraphProvider::new(PathBuf::from("graph_index.py"), PathBuf::from("i.sqlite"));
+        assert_eq!(p.id(), PROVIDER_CODE_GRAPH);
+        assert_eq!(p.domain(), crate::grow::DOMAIN_CODE);
+        for t in ["symbol", "class", "file", "rationale", "concept"] {
+            assert!(p.supports_type(t), "{t}");
+        }
+        assert!(!p.supports_type("primitive"));
+        // code carries no crystal evidence ladder and no capability contracts
+        assert!(!p.supports_evidence_floors());
+        assert_eq!(p.snapshot().domain, crate::grow::DOMAIN_CODE);
+    }
+
+    #[test]
+    fn a_missing_index_tool_leaves_code_queries_unresolved_rather_than_failing() {
+        let p = CodeGraphProvider::new(
+            PathBuf::from("no-such-tool.py"),
+            PathBuf::from("no-such-index.sqlite"),
+        );
+        // an absent interpreter or tool is a research TODO, not a crash
+        assert!(p.candidates(&code_query("anything")).is_empty());
     }
 
     #[test]
