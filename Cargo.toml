@@ -3,7 +3,7 @@ name = "kannaka-hdl"
 version = "0.11.0"
 edition = "2021"
 description = "KannakaHDL — the Holographic Development Language: architectures grown from discovered components by recursive rewrite rules"
-license = "MIT"
+license-file = "LICENSE"
 repository = "https://github.com/kannaka-labs/kannaka-hdl"
 
 [[bin]]
